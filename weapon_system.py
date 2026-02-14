@@ -122,6 +122,13 @@ def setup_weapon_system(game) -> None:
         (0.56, 0.0, 1.0),
     ]
     game.sword_blade_echo_scale = Vec3(0.095 * sword_scale, 0.74 * sword_scale, 0.072 * sword_scale)
+    game.sword_throw_distance = max(game.sword_reach * 2.6, 5.0)
+    game.sword_throw_outbound_time = 0.22
+    game.sword_throw_total_time = 0.56
+    game.sword_throw_spin_speed = 1080.0
+    game.sword_throw_hit_targets = set()
+    game.sword_throw_origin = None
+    game.sword_throw_dir = Vec3(0, 1, 0)
 
 
 def _update_blade_echoes(game, dt: float) -> None:
@@ -266,6 +273,24 @@ def trigger_spin_attack(game) -> None:
     game._play_sound(game.sfx_attack_spin, volume=0.78, play_rate=1.0)
 
 
+def trigger_throw_attack(game) -> None:
+    if game.attack_cooldown > 0.0 or game.attack_mode != "idle":
+        return
+    game.attack_mode = "throw"
+    game.attack_timer = 0.0
+    game.attack_hit_targets.clear()
+    game.sword_throw_hit_targets.clear()
+    game.sword_throw_origin = None
+    throw_dir = Vec3(game.weapon_forward.x, game.weapon_forward.y, 0.0)
+    if throw_dir.lengthSquared() < 1e-6:
+        yaw = math.radians(game.heading)
+        throw_dir = Vec3(-math.sin(yaw), math.cos(yaw), 0.0)
+    if throw_dir.lengthSquared() > 1e-6:
+        throw_dir.normalize()
+    game.sword_throw_dir = throw_dir
+    game._play_sound(game.sfx_attack_spin if getattr(game, "sfx_attack_spin", None) is not None else game.sfx_attack, volume=0.82, play_rate=1.12)
+
+
 def apply_attack_hits(game, is_spin: bool) -> None:
     if not game.monsters:
         return
@@ -322,6 +347,48 @@ def apply_attack_hits(game, is_spin: bool) -> None:
             monster["velocity"] = Vec3(monster["velocity"]) + away * knock + Vec3(0, 0, 0.35)
 
 
+def _apply_throw_hits(game, sword_pos: Vec3, radius: float) -> None:
+    if not game.monsters:
+        return
+
+    player_w = float(getattr(game, "player_w", 0.0))
+    for monster in game.monsters:
+        if monster.get("dead", False):
+            continue
+        root = monster.get("root")
+        if root is None or root.isEmpty():
+            continue
+
+        monster_id = id(root)
+        if monster_id in game.sword_throw_hit_targets:
+            continue
+
+        monster_pos = root.getPos()
+        planar = Vec3(monster_pos.x - sword_pos.x, monster_pos.y - sword_pos.y, 0.0)
+        planar_dist = planar.length()
+        if planar_dist > (radius + float(monster.get("radius", 1.0)) * 0.72):
+            continue
+
+        monster_w = float(monster.get("w", 0.0))
+        w_scale = max(0.1, float(getattr(game, "w_dimension_distance_scale", 4.0)))
+        dw_scaled = (monster_w - player_w) * w_scale
+        dist4d = math.sqrt(max(0.0, planar_dist * planar_dist + dw_scaled * dw_scaled))
+        max_hit = radius + float(monster.get("radius", 1.0))
+        if dist4d > max_hit:
+            continue
+
+        game.sword_throw_hit_targets.add(monster_id)
+        dmg_mult = max(0.5, float(getattr(game, "sword_damage_multiplier", 1.0)))
+        dmg_mult *= max(0.55, float(getattr(game, "combat_damage_multiplier", 1.0)))
+        damage = 44.0 * dmg_mult
+        game._damage_monster(monster, damage)
+
+        away = Vec3(monster_pos.x - sword_pos.x, monster_pos.y - sword_pos.y, 0.0)
+        if away.lengthSquared() > 1e-8:
+            away.normalize()
+            monster["velocity"] = Vec3(monster["velocity"]) + away * 4.8 + Vec3(0.0, 0.0, 0.42)
+
+
 def update_weapon_system(game, dt: float) -> None:
     if not hasattr(game, "sword_pivot"):
         return
@@ -369,6 +436,7 @@ def update_weapon_system(game, dt: float) -> None:
     yaw_offset = -16.0
     pitch = -18.0
     roll = 0.0
+    pivot_pos = Vec3(game.sword_anchor_pos)
 
     if game.attack_mode == "swing":
         game.attack_timer += dt
@@ -402,13 +470,64 @@ def update_weapon_system(game, dt: float) -> None:
             cd_mult = max(0.35, float(getattr(game, "attack_cooldown_multiplier", 1.0)))
             game.attack_cooldown = 0.12 * cd_mult
             game.sword_prev_tip_pos = None
+    elif game.attack_mode == "throw":
+        game.attack_timer += dt
+        total = max(0.2, float(getattr(game, "sword_throw_total_time", 0.56)))
+        outbound = max(0.06, min(total * 0.9, float(getattr(game, "sword_throw_outbound_time", 0.22))))
+        distance = max(1.0, float(getattr(game, "sword_throw_distance", game.sword_reach * 2.6)))
+
+        if game.sword_throw_origin is None:
+            game.sword_throw_origin = Vec3(game.sword_anchor_pos)
+
+        origin = Vec3(game.sword_throw_origin)
+        throw_dir = Vec3(getattr(game, "sword_throw_dir", game.weapon_forward))
+        if throw_dir.lengthSquared() < 1e-8:
+            throw_dir = Vec3(game.weapon_forward)
+        if throw_dir.lengthSquared() > 1e-8:
+            throw_dir.normalize()
+
+        t = min(1.0, game.attack_timer / total)
+        if t <= (outbound / total):
+            out_t = t / max(1e-6, outbound / total)
+            forward_amount = 1.0 - (1.0 - out_t) * (1.0 - out_t)
+            vel_sign = 1.0
+        else:
+            back_t = (t - (outbound / total)) / max(1e-6, 1.0 - (outbound / total))
+            forward_amount = (1.0 - back_t) * (1.0 - back_t)
+            vel_sign = -1.0
+
+        arc = math.sin(t * math.pi) * distance * 0.16
+        right_throw = gravity_up.cross(throw_dir)
+        if right_throw.lengthSquared() > 1e-8:
+            right_throw.normalize()
+        throw_pos = origin + throw_dir * (distance * forward_amount) + right_throw * arc
+        throw_pos += gravity_up * (0.08 + 0.12 * math.sin(t * math.pi))
+
+        hit_radius = 0.95 + sword_scale * 0.22
+        _apply_throw_hits(game, throw_pos, hit_radius)
+
+        forward_heading = math.degrees(math.atan2(-throw_dir.x, throw_dir.y))
+        heading = forward_heading if vel_sign >= 0.0 else (forward_heading + 180.0)
+        yaw_offset = 0.0
+        pitch = -8.0 + 5.0 * math.sin(t * math.pi)
+        roll = (game.attack_timer * float(getattr(game, "sword_throw_spin_speed", 1080.0))) % 360.0
+        pivot_pos = throw_pos
+
+        if t >= 1.0:
+            game.attack_mode = "idle"
+            game.attack_timer = 0.0
+            game.sword_throw_origin = None
+            game.sword_throw_hit_targets.clear()
+            cd_mult = max(0.35, float(getattr(game, "attack_cooldown_multiplier", 1.0)))
+            game.attack_cooldown = 0.14 * cd_mult
+            game.sword_prev_tip_pos = None
     else:
         game.sword_prev_tip_pos = None
 
-    game.sword_pivot.setPos(game.sword_anchor_pos)
+    game.sword_pivot.setPos(pivot_pos)
     game.sword_pivot.setHpr(heading + yaw_offset, pitch, roll)
 
-    should_emit_blade_echo = game.attack_mode in ("swing", "spin")
+    should_emit_blade_echo = game.attack_mode in ("swing", "spin", "throw")
     if should_emit_blade_echo:
         game.sword_blade_echo_emit_timer -= dt
         if game.sword_blade_echo_emit_timer <= 0.0:
@@ -423,6 +542,8 @@ def update_weapon_system(game, dt: float) -> None:
             glow_boost = 1.32
         elif game.attack_mode == "spin":
             glow_boost = 1.58
+        elif game.attack_mode == "throw":
+            glow_boost = 1.76
         hue = (game.roll_time * 1.9) % 1.0
         cr, cg, cb = colorsys.hsv_to_rgb(hue, 0.78, 1.0)
         pulse = 0.66 + 0.34 * (0.5 + 0.5 * math.sin(game.roll_time * 18.0))

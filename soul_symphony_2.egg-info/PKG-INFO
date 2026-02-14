@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: soul-symphony-2
-Version: 0.1.1
+Version: 0.1.2
 Summary: Panda3D procedural geometric dungeon prototype
 Author: Soul Symphony Contributors
 License: Proprietary
@@ -17,6 +17,9 @@ Description-Content-Type: text/markdown
 Requires-Dist: panda3d>=1.10
 Requires-Dist: numpy>=1.26
 Requires-Dist: numba>=0.59
+Requires-Dist: bullet
+Requires-Dist: colorsys
+Requires-Dist: noise
 
 # GPU / CUDA 設定
 

@@ -32,7 +32,7 @@ except Exception:
     BulletBoxShape = None
     BulletRigidBodyNode = None
     BulletWorld = None
-from panda3d.core import AmbientLight, BitMask32, CardMaker, ColorBlendAttrib, CullFaceAttrib, DirectionalLight, Fog, LightRampAttrib, LineSegs, Material, NodePath, PNMImage, Point2, PointLight, Shader, TexGenAttrib, TextNode, Texture, TextureStage, TransparencyAttrib, Vec2, Vec3, WindowProperties, loadPrcFileData
+from panda3d.core import AmbientLight, BitMask32, CardMaker, ColorBlendAttrib, CullFaceAttrib, DirectionalLight, Fog, Geom, GeomNode, GeomTriangles, GeomVertexData, GeomVertexFormat, GeomVertexWriter, LightRampAttrib, LineSegs, Material, NodePath, PNMImage, Point2, PointLight, Shader, TexGenAttrib, TextNode, Texture, TextureStage, TransparencyAttrib, Vec2, Vec3, WindowProperties, loadPrcFileData
 
 from camera import camera_orbit_position, resolve_camera_collision, rotate_around_axis, setup_camera
 from ball_visuals import spawn_player_ball
@@ -40,7 +40,7 @@ from accel_math import NUMBA_AVAILABLE, NUMPY_AVAILABLE, compute_level_w_batch, 
 from level import BSPGenerator, GenerationConfig, Room
 from player import queue_jump
 from soundfx import load_first_sfx, play_sound
-from weapon_system import apply_attack_hits, setup_weapon_system, trigger_spin_attack, trigger_swing_attack, update_weapon_system
+from weapon_system import apply_attack_hits, setup_weapon_system, trigger_spin_attack, trigger_swing_attack, trigger_throw_attack, update_weapon_system
 from world import create_checker_texture, create_shadow_texture
 
 
@@ -67,10 +67,11 @@ def _detect_native_resolution() -> tuple[int, int]:
 
 def _configure_display_prc() -> None:
     width, height = _detect_native_resolution()
-    os.environ.setdefault("SOULSYM_SAFE_RENDER", "1")
+    os.environ.setdefault("SOULSYM_SAFE_RENDER", "0" if sys.platform.startswith("linux") else "1")
     os.environ.setdefault("SOULSYM_ENABLE_VIDEO_DISTORTION", "1")
     os.environ.setdefault("SOULSYM_VERBOSE_SCENE_STATS", "0")
     os.environ.setdefault("SOULSYM_ENABLE_NUMBA", "0")
+    os.environ.setdefault("SOULSYM_WATER_EMISSIVE_LINUX", "1" if sys.platform.startswith("linux") else "0")
     os.environ.setdefault("SOULSYM_FULLSCREEN", "1")
     os.environ.setdefault("SOULSYM_VSYNC", "1")
     vsync_on = _env_flag("SOULSYM_VSYNC", True)
@@ -239,7 +240,7 @@ class SoulSymphony(ShowBase):
         self.enable_dynamic_shadows = (not self.performance_mode) and (not self.safe_render_mode)
         self.enable_ball_shadow = not self.performance_mode
         self.enable_occlusion_outlines = (not self.performance_mode) and (not self.safe_render_mode)
-        self.performance_player_light_enabled = True
+        self.performance_player_light_enabled = False
         self.performance_player_light_cycle_speed = 2.6
         self.performance_player_light_saturation = 0.9
         self.performance_player_light_value = 1.0
@@ -293,8 +294,20 @@ class SoulSymphony(ShowBase):
         self._setup_lights()
         self._setup_toon_rendering()
 
-        self.box_model = self.loader.loadModel("models/box")
-        self.sphere_model = self.loader.loadModel("models/misc/sphere")
+        self.box_model = self._load_first_model([
+            "models/box",
+            "models/box.egg",
+            "models/misc/rgbCube",
+        ])
+        if self.box_model is None:
+            self.box_model = self._create_fallback_cube_model()
+        self.sphere_model = self._load_first_model([
+            "models/misc/sphere",
+            "models/misc/sphere.egg",
+            "models/smiley",
+        ])
+        if self.sphere_model is None:
+            self.sphere_model = self._create_fallback_sphere_model()
         self.box_model.clearTexture()
         self.box_norm_scale, self.box_norm_offset = self._compute_model_normalization(self.box_model)
         self.texture_cache: dict[str, Texture] = {}
@@ -317,9 +330,12 @@ class SoulSymphony(ShowBase):
         self.level_additive_stage.setColor((add_gain, add_gain, add_gain, 1.0))
         self.floor_fractal_tex_a = self._create_fractal_symmetry_texture(size=256, symmetry=6, seed=0.37)
         self.floor_fractal_tex_b = self._create_fractal_symmetry_texture(size=256, symmetry=9, seed=0.81)
+        self.water_base_tex = self._load_water_base_texture()
         self.water_specular_tex = self._create_water_specular_texture(size=256, seed=0.41)
         self.floor_wet_shader = self._load_floor_wet_shader()
+        self.water_surface_shader = None
         self.floor_shader_nodes: list[NodePath] = []
+        self.water_shader_nodes: list[NodePath] = []
         self.floor_contact_uv = Vec2(0.0, 0.0)
         self.floor_contact_strength = 0.2
         self.floor_contact_decay = 3.6
@@ -328,7 +344,8 @@ class SoulSymphony(ShowBase):
         self.water_overlay_min_area = 20.5
         self.water_level_offset = 0.0
         self.water_surface_raise = 0.028
-        self.water_uv_repeat_scale =32.0
+        self.water_uv_repeat_scale = 32.0
+        self.room_floor_uv_repeat_scale = 100.0
         self.water_wave_amplitude = 0.24
         self.water_wave_speed = 10.4
         self.water_wave_freq_x = 0.09
@@ -336,11 +353,15 @@ class SoulSymphony(ShowBase):
         self.water_specular_detail_repeat = 7.5
         self.water_specular_strength = 0.72
         self.water_specular_scroll_speed = 1.85
+        self.water_additive_opacity_scale = 0.06
+        self.water_additive_gain_scale = 0.08
+        self.water_rainbow_strength = 0.12
+        self.water_diffusion_strength = 0.38
         self.water_color_cycle_enabled = True
         self.water_color_cycle_speed = 5.8
         self.water_color_cycle_saturation = 0.92
         self.water_color_cycle_value = 1.0
-        self.water_color_cycle_alpha = 0.34
+        self.water_color_cycle_alpha = 0.16
         self.water_color_cycle_smoothness = 0.24
         self.water_emissive_linux_enabled = sys.platform.startswith("linux") and _env_flag("SOULSYM_WATER_EMISSIVE_LINUX", False)
         self.water_emissive_linux_scale = 1.35
@@ -517,6 +538,8 @@ class SoulSymphony(ShowBase):
         self.phase_room_overlays: list[dict] = []
         self.landmark_model_candidates: list[str] | None = None
         self.landmark_fallback_model: str | None = None
+        self.landmark_linux_axis_fix = sys.platform.startswith("linux") and _env_flag("SOULSYM_LANDMARK_LINUX_AXIS_FIX", True)
+        self.landmark_linux_axis_fix_degrees = -90.0
         self.warp_cooldown = 0.0
         self.vertical_movers: list[dict] = []
         self.room_bob_amp = 0.0
@@ -556,7 +579,10 @@ class SoulSymphony(ShowBase):
         self.fall_air_timer = 0.0
         self.fall_reference_z = self.floor_y + 2.0
         self.game_over_active = False
+        self.game_over_auto_restart_seconds = 10.0
+        self.game_over_countdown = self.game_over_auto_restart_seconds
         self.game_over_ui: NodePath | None = None
+        self.game_over_prompt_text_node: TextNode | None = None
         self.win_active = False
         self.win_ui: NodePath | None = None
         self.player_ai_enabled = True
@@ -584,6 +610,10 @@ class SoulSymphony(ShowBase):
         self.player_ai_jump_probe_distance = 1.8
         self.player_ai_bomb_range_mul = 1.9
         self.player_ai_bomb_desire = 0.42
+        self.player_ai_missile_range_mul = 4.4
+        self.player_ai_missile_desire = 0.58
+        self.player_ai_throw_range_mul = 2.2
+        self.player_ai_throw_desire = 0.46
         self.w_dimension_distance_scale = 4.0
         self.subtractive_drill_max_radius = 4
 
@@ -633,7 +663,7 @@ class SoulSymphony(ShowBase):
         self._mouse_centered = False
         self.roll_force = 18.0
         self.roll_torque = 14.0
-        self.max_ball_speed = 30.5
+        self.max_ball_speed = 15.25
         self.ball_friction_default = 0.02
         self.ball_friction_shift = 0.05
         self.link_control_gain = 32.0
@@ -690,6 +720,11 @@ class SoulSymphony(ShowBase):
         self.visual_w_map: dict[int, float] = {}
         self.monsters: list[dict] = []
         self.monster_max_hp = 100.0
+        self.monster_giant_spawn_ratio = 0.08
+        self.monster_giant_hp_mult = 6.5
+        self.monster_fast_ratio = 0.22
+        self.monster_fast_speed_min = 2.0
+        self.monster_fast_speed_max = 3.4
         self.monster_contact_sfx_cooldown = 0.0
         self.hyper_uv_nodes: list[dict] = []
         self.dynamic_room_uv_nodes: list[dict] = []
@@ -728,6 +763,18 @@ class SoulSymphony(ShowBase):
         self.monster_anim_tick = 0
         self.shadow_update_timer = 0.0
         self.health_ui_update_timer = 0.0
+        self.input_hud_enabled = True
+        self.input_hud_buttons: dict[str, dict] = {}
+        self.input_hud_mouse_state = {"mouse1": False, "mouse2": False, "mouse3": False}
+        self.input_hud_r_state = False
+        self.input_hud_r_pulse = 0.0
+        self.holo_map_enabled = True
+        self.holo_map_ui: NodePath | None = None
+        self.holo_map_marker_root: NodePath | None = None
+        self.holo_map_markers: list[NodePath] = []
+        self.holo_map_radius_world = 36.0
+        self.holo_map_update_timer = 0.0
+        self.holo_map_update_interval = 1.0 / 14.0
         self.light_update_timer = 0.0
         self.light_update_interval = 1.0 / 20.0 if self.performance_mode else 1.0 / 48.0
         self.gravity_particles_update_timer = 0.0
@@ -742,6 +789,7 @@ class SoulSymphony(ShowBase):
         self.level_texgen_mode = None
         self.ball_texgen_mode = None
         self.ball_tex_stage = TextureStage("ball-cube-uv")
+        self.water_tex_stage = TextureStage("water-cube-uv")
 
         self.weapon_forward = Vec3(0, 1, 0)
         self.sword_anchor_pos: Vec3 | None = None
@@ -761,6 +809,8 @@ class SoulSymphony(ShowBase):
         self.sword_damage_multiplier = 1.0
         self.sword_damage_per_pickup = 0.16
         self.sword_damage_multiplier_cap = 4.0
+        self.pickup_attract_radius = 3.1
+        self.pickup_attract_speed = 8.2
         self.player_attack_stat = 0
         self.player_defense_stat = 0
         self.player_dex_stat = 0
@@ -825,7 +875,46 @@ class SoulSymphony(ShowBase):
         self.hyperbomb_cooldown_duration = 1.75
         self.hyperbomb_spheres: list[dict] = []
         self.hyperbomb_audio_nodes: list[dict] = []
+        self.magic_missiles: list[dict] = []
+        self.magic_missile_cooldown = 0.0
+        self.magic_missile_cooldown_duration = 4.5
+        self.magic_missile_cast_count = 6
+        self.magic_missile_life = 4.2
+        self.magic_missile_speed = 25.0
+        self.magic_missile_turn_rate = 7.6
+        self.magic_missile_damage = 34.0
+        self.magic_missile_retarget_interval = 0.12
+        self.magic_missile_color_cycle_rate = 11.5
+        self.magic_missile_emissive_strength = 1.0
+        self.magic_missile_arc_height = 0.9
+        self.magic_missile_arc_drop = 1.15
+        self.magic_missile_trails: list[dict] = []
+        self.magic_missile_trail_emit_interval = 0.02
+        self.magic_missile_template: NodePath | None = None
+        self.magic_missile_cylinder_model: NodePath | None = None
+        self.magic_missile_cone_model: NodePath | None = None
         self.health_powerups: list[dict] = []
+        self.black_holes: list[dict] = []
+        self.black_hole_distort_intensity = 0.0
+        self.black_hole_count = 14 if self.performance_mode else 28
+        self.black_hole_blower_ratio = 0.46
+        self.black_hole_pull_strength = 292.0
+        self.black_hole_influence_radius = 15.5
+        self.black_hole_roam_speed = 2.1
+        self.black_hole_visual_radius = 2.05
+        self.black_hole_suck_max_force = 165.0
+        self.black_hole_suck_escape_soften = 0.38
+        self.black_hole_monster_force_scale = 0.032
+        self.black_hole_monster_warp_cooldown = 2.4
+        self.black_hole_monster_spit_speed = 8.2
+        self.black_hole_suck_outline_tex = None
+        self.black_hole_blow_dial_tex = None
+        self.black_hole_suck_sfx_path = None
+        self.black_hole_blow_sfx_path = None
+        self.black_hole_sfx_volume = 0.9
+        self.black_hole_sfx_min_distance = 3.0
+        self.black_hole_sfx_max_distance = 520.0
+        self.black_hole_doppler_exaggeration = 13.5
         self.timespace_tone = None
         self.timespace_tone_target_rate = 1.0
         self.timespace_tone_current_rate = 1.0
@@ -852,6 +941,7 @@ class SoulSymphony(ShowBase):
         self._start_room_fold_worker_if_needed()
         self._setup_room_landmarks()
         self._spawn_player_ball()
+        self._spawn_roaming_black_holes(self.black_hole_count)
         if hasattr(self, "ball_np") and self.ball_np is not None and hasattr(self, "platform_course_spawn_pos"):
             spawn = Vec3(self.platform_course_spawn_pos)
             self.ball_np.setPos(spawn)
@@ -860,6 +950,7 @@ class SoulSymphony(ShowBase):
         self._setup_kill_protection_system()
         self._initialize_infinite_world_goal()
         self._setup_weapon()
+        self._setup_magic_missile_visuals()
         self._spawn_hypercube_monsters(count=64)
         self._setup_monster_ai_system()
         self._setup_ball_outline()
@@ -875,6 +966,8 @@ class SoulSymphony(ShowBase):
         self._setup_mouse_look()
         self._setup_video_distortion()
         self._setup_player_health_ui()
+        self._setup_input_hud()
+        self._setup_holographic_map_ui()
         self._setup_game_over_ui()
         self._setup_win_ui()
         if self.enable_particles:
@@ -892,6 +985,7 @@ class SoulSymphony(ShowBase):
             self.audio3d.attachListener(self.camera)
         if hasattr(self.audio3d, "setListenerVelocityAuto"):
             self.audio3d.setListenerVelocityAuto()
+        self._attach_black_hole_loop_sounds()
 
         self.keys = {k: False for k in ["w", "a", "s", "d"]}
         for key in self.keys:
@@ -908,15 +1002,19 @@ class SoulSymphony(ShowBase):
         self.accept("space", self._queue_jump)
         self.accept("wheel_up", self._on_mouse_wheel, [1.0])
         self.accept("wheel_down", self._on_mouse_wheel, [-1.0])
-        self.accept("mouse1", self._trigger_swing_attack)
-        self.accept("mouse2", self._trigger_hyperbomb)
-        self.accept("mouse3", self._trigger_spin_attack)
+        self.accept("mouse1", self._on_mouse1_pressed)
+        self.accept("mouse1-up", self._on_mouse_button_released, ["mouse1"])
+        self.accept("mouse2", self._on_mouse2_pressed)
+        self.accept("mouse2-up", self._on_mouse_button_released, ["mouse2"])
+        self.accept("mouse3", self._on_mouse3_pressed)
+        self.accept("mouse3-up", self._on_mouse_button_released, ["mouse3"])
         self.accept("lshift", self._set_hyperspace_gravity_hold, [True])
         self.accept("lshift-up", self._set_hyperspace_gravity_hold, [False])
         self.accept("rshift", self._set_hyperspace_gravity_hold, [True])
         self.accept("rshift-up", self._set_hyperspace_gravity_hold, [False])
         self.accept("1", self._toggle_performance_mode)
-        self.accept("r", self._restart_after_game_over)
+        self.accept("r", self._on_r_pressed)
+        self.accept("r-up", self._on_r_released)
         self.accept("escape", self._on_escape_pressed)
 
         self.sfx_roll = self._load_first_sfx([
@@ -957,6 +1055,20 @@ class SoulSymphony(ShowBase):
             "soundfx/attack",
             "sfx/attack",
         ])
+        self.sfx_attack_homingmissile = self._load_first_sfx_2d([
+            "attackhomingmissle",
+            "attack_homingmissle",
+            "attackhomingmissile",
+            "attack_homingmissile",
+            "soundfx/attackhomingmissle",
+            "soundfx/attack_homingmissle",
+            "soundfx/attackhomingmissile",
+            "soundfx/attack_homingmissile",
+            "sfx/attackhomingmissle",
+            "sfx/attack_homingmissle",
+            "sfx/attackhomingmissile",
+            "sfx/attack_homingmissile",
+        ])
         self.sfx_attack_spin = self._load_first_sfx_2d([
             "attackspin",
             "soundfx/attackspin",
@@ -991,10 +1103,13 @@ class SoulSymphony(ShowBase):
         self.voiceover_volume_scale = 0.5
         self.sfx_attackbomb_path = self._resolve_attackbomb_path()
         self.sfx_monster_hum_path = self._resolve_monster_hum_path()
+        self.black_hole_suck_sfx_path = self._resolve_black_hole_sfx_path("suck")
+        self.black_hole_blow_sfx_path = self._resolve_black_hole_sfx_path("blow")
         self.sfx_monster_hum_is_idle = bool(
             self.sfx_monster_hum_path
             and "monsteridle" in os.path.basename(self.sfx_monster_hum_path).lower()
         )
+        self._attach_black_hole_loop_sounds()
         self.hit_cooldown = 0.0
         self.bgm_track = None
         self.bgm_track_path = None
@@ -1129,6 +1244,7 @@ class SoulSymphony(ShowBase):
             sample_cf = self._compression_factor_at(self.ball_np.getPos(), self.roll_time)
             print(f"Compression factor at spawn: {sample_cf:.3f}")
         print(f"Texture cache entries: {len(self.texture_cache)}")
+        print(f"Water base texture: {getattr(self, 'water_base_tex_path', 'procedural')}")
         mode_counts: dict[str, int] = {}
         for entry in self.dynamic_room_uv_nodes:
             mode = str(entry.get("mode", "?"))
@@ -1179,6 +1295,71 @@ class SoulSymphony(ShowBase):
             if os.path.exists(path):
                 return path
         return None
+
+    def _resolve_black_hole_sfx_path(self, kind: str) -> str | None:
+        key = str(kind).strip().lower()
+        if key == "suck":
+            stems = [
+                "sucker",
+                "suck",
+                "blackholesucker",
+                "blackhole_sucker",
+                "blackhole_suck",
+            ]
+        else:
+            stems = [
+                "blower",
+                "blow",
+                "blackholeblower",
+                "blackhole_blower",
+                "blackhole_blow",
+            ]
+
+        candidates: list[str] = []
+        exts = ["wav", "ogg", "mp3"]
+        prefixes = ["", "soundfx/", "sfx/"]
+        for stem in stems:
+            for prefix in prefixes:
+                for ext in exts:
+                    candidates.append(f"{prefix}{stem}.{ext}")
+
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        return None
+
+    def _attach_black_hole_loop_sounds(self) -> None:
+        if not hasattr(self, "audio3d") or self.audio3d is None:
+            return
+        if not getattr(self, "black_holes", None):
+            return
+
+        for entry in self.black_holes:
+            if entry.get("loop_sfx") is not None:
+                continue
+            root = entry.get("root")
+            if root is None or root.isEmpty():
+                continue
+            kind = str(entry.get("kind", "suck")).lower()
+            sfx_path = self.black_hole_suck_sfx_path if kind == "suck" else self.black_hole_blow_sfx_path
+            if not sfx_path:
+                continue
+            try:
+                sound = self.audio3d.loadSfx(sfx_path)
+            except Exception:
+                sound = None
+            if not sound:
+                continue
+            self.audio3d.attachSoundToObject(sound, root)
+            self.audio3d.setSoundMinDistance(sound, float(getattr(self, "black_hole_sfx_min_distance", 5.0)))
+            self.audio3d.setSoundMaxDistance(sound, float(getattr(self, "black_hole_sfx_max_distance", 280.0)))
+            if hasattr(self.audio3d, "setSoundVelocityAuto"):
+                self.audio3d.setSoundVelocityAuto(sound)
+            sound.setLoop(True)
+            sound.setVolume(float(getattr(self, "black_hole_sfx_volume", 0.72)))
+            sound.setPlayRate(1.0)
+            sound.play()
+            entry["loop_sfx"] = sound
 
     def _distance4d_sq(self, pos_a: Vec3, w_a: float, pos_b: Vec3, w_b: float) -> float:
         d3_sq = (Vec3(pos_b) - Vec3(pos_a)).lengthSquared()
@@ -1383,6 +1564,16 @@ class SoulSymphony(ShowBase):
         except Exception:
             return None
 
+    def _load_water_surface_shader(self):
+        shader_vert = "graphics/shaders/water_surface.vert"
+        shader_frag = "graphics/shaders/water_surface.frag"
+        if not os.path.exists(shader_vert) or not os.path.exists(shader_frag):
+            return None
+        try:
+            return Shader.load(Shader.SL_GLSL, shader_vert, shader_frag)
+        except Exception:
+            return None
+
     def _update_floor_wet_shader_inputs(self, dt: float, grounded_contact: Vec3 | None, speed: float) -> None:
         if self.floor_wet_shader is None:
             return
@@ -1410,6 +1601,27 @@ class SoulSymphony(ShowBase):
             keep.append(node)
         self.floor_shader_nodes = keep
 
+    def _update_water_surface_shader_inputs(self) -> None:
+        if self.water_surface_shader is None:
+            return
+        keep: list[NodePath] = []
+        uv_scale = max(0.2, float(getattr(self, "water_uv_repeat_scale", 1.0)))
+        alpha = self._clamp(float(getattr(self, "water_color_cycle_alpha", 0.52)), 0.05, 1.0)
+        rainbow_strength = self._clamp(float(getattr(self, "water_rainbow_strength", 0.28)), 0.0, 2.0)
+        diffusion_strength = self._clamp(float(getattr(self, "water_diffusion_strength", 0.72)), 0.0, 2.0)
+        spec_strength = self._clamp(float(getattr(self, "water_specular_strength", 0.72)), 0.0, 2.0)
+        for node in self.water_shader_nodes:
+            if node is None or node.isEmpty():
+                continue
+            node.setShaderInput("u_time", self.roll_time)
+            node.setShaderInput("u_uv_scale", uv_scale)
+            node.setShaderInput("u_alpha", alpha)
+            node.setShaderInput("u_rainbow_strength", rainbow_strength)
+            node.setShaderInput("u_diffusion_strength", diffusion_strength)
+            node.setShaderInput("u_spec_strength", spec_strength)
+            keep.append(node)
+        self.water_shader_nodes = keep
+
     def _update_video_distortion(self, dt: float, speed: float) -> None:
         if not getattr(self, "enable_video_distortion", True):
             return
@@ -1435,6 +1647,8 @@ class SoulSymphony(ShowBase):
         compression_intensity = self._clamp((1.0 - local_cf) / 0.92, 0.0, 1.0)
         dilation_intensity = self._clamp((local_cf - 1.0) / 0.9, 0.0, 1.0)
         timespace_intensity = max(compression_intensity, dilation_intensity * 0.42)
+        black_hole_intensity = self._clamp(float(getattr(self, "black_hole_distort_intensity", 0.0)), 0.0, 1.65)
+        timespace_intensity = max(timespace_intensity, black_hole_intensity * 0.9)
 
         tone_rate = self._clamp(float(getattr(self, "timespace_tone_current_rate", 1.0)), 0.28, 3.4)
         sine_cycle = 0.5 + 0.5 * math.sin(self.roll_time * (2.2 + tone_rate * 2.9))
@@ -1448,9 +1662,9 @@ class SoulSymphony(ShowBase):
             float(getattr(self, "video_distort_dynamic_max_mul", 2.75)),
         )
 
-        swim_speed = (0.4 + 0.95 * speed_norm) * (1.0 + 0.36 * timespace_intensity) * (0.92 + 0.24 * sine_cycle)
+        swim_speed = (0.4 + 0.95 * speed_norm) * (1.0 + 0.36 * timespace_intensity + black_hole_intensity * 0.55) * (0.92 + 0.24 * sine_cycle)
         pulse = 0.92 + 0.4 * (0.5 + 0.5 * math.sin(self.roll_time * (3.7 + tone_rate * 0.8)))
-        strength = self.video_distort_strength * (1.05 + 0.95 * speed_norm) * pulse * dynamic_mul
+        strength = self.video_distort_strength * (1.05 + 0.95 * speed_norm + black_hole_intensity * 1.1) * pulse * dynamic_mul
         bloom_strength = self.video_bloom_strength * (0.8 + speed_norm * 0.9) * (0.86 + 0.44 * timespace_intensity)
         tex_w, tex_h = getattr(self, "video_distort_tex_size", (0, 0))
         if tex_w <= 0 or tex_h <= 0:
@@ -1995,7 +2209,7 @@ class SoulSymphony(ShowBase):
                 node.setBin("transparent", 28)
                 node.setDepthWrite(False)
                 node.clearTexture()
-                node.setTexture(self.level_checker_tex, 1)
+                #node.setTexture(self.level_checker_tex, 1)
                 self._register_color_cycle(node, color, min_speed=0.85, max_speed=1.9)
 
                 pos = Vec3(
@@ -2359,25 +2573,52 @@ class SoulSymphony(ShowBase):
         if self.attack_mode == "idle" and self.attack_cooldown <= 0.0:
             bomb_range = max(self.sword_reach * 0.9, self.sword_reach * float(getattr(self, "player_ai_bomb_range_mul", 1.9)))
             bomb_desire = self._clamp(float(getattr(self, "player_ai_bomb_desire", 0.42)), 0.0, 1.0)
+            missile_range = max(self.sword_reach * 1.5, self.sword_reach * float(getattr(self, "player_ai_missile_range_mul", 4.4)))
+            missile_desire = self._clamp(float(getattr(self, "player_ai_missile_desire", 0.58)), 0.0, 1.0)
+            throw_range = max(self.sword_reach * 0.95, self.sword_reach * float(getattr(self, "player_ai_throw_range_mul", 2.2)))
+            throw_desire = self._clamp(float(getattr(self, "player_ai_throw_desire", 0.46)), 0.0, 1.0)
+
+            should_missile = (
+                target_dist_4d <= missile_range
+                and self.magic_missile_cooldown <= 0.0
+                and (target_dist_4d > self.sword_reach * 0.82 or self.player_ai_combo_step % 5 == 0)
+                and (self.player_ai_combo_step % 4 == 2 or random.random() < missile_desire)
+            )
             should_bomb = (
                 target_dist_4d <= bomb_range
                 and self.hyperbomb_cooldown <= 0.0
                 and (self.player_ai_combo_step % 3 == 1 or random.random() < bomb_desire)
             )
-            if should_bomb:
+
+            if should_missile:
+                self._trigger_magic_missile_attack()
+                self.player_ai_combo_step = (self.player_ai_combo_step + 1) % 8
+                self.player_ai_combo_timer = random.uniform(0.18, 0.34)
+            elif should_bomb:
                 self._trigger_hyperbomb()
-                self.player_ai_combo_step = (self.player_ai_combo_step + 1) % 6
+                self.player_ai_combo_step = (self.player_ai_combo_step + 1) % 8
                 self.player_ai_combo_timer = random.uniform(0.2, 0.4)
             elif target_dist_4d <= self.sword_reach * 0.95:
                 if self.player_ai_combo_timer <= 0.0:
-                    self.player_ai_combo_step = (self.player_ai_combo_step + 1) % 6
+                    self.player_ai_combo_step = (self.player_ai_combo_step + 1) % 8
                 close_quarters = target_dist_4d <= self.sword_reach * 0.62
-                favor_spin = close_quarters or self.player_ai_combo_step in (0, 2, 4)
-                if favor_spin:
+                should_throw = (
+                    target_dist_4d >= self.sword_reach * 0.58
+                    and target_dist_4d <= throw_range
+                    and (self.player_ai_combo_step in (1, 5, 7) or random.random() < throw_desire)
+                )
+                favor_spin = close_quarters or self.player_ai_combo_step in (0, 2, 4, 6)
+                if should_throw:
+                    self._trigger_throw_attack()
+                elif favor_spin:
                     self._trigger_spin_attack()
                 else:
                     self._trigger_swing_attack()
                 self.player_ai_combo_timer = random.uniform(0.12, 0.26)
+            elif target_dist_4d <= throw_range and random.random() < throw_desire * 0.65:
+                self._trigger_throw_attack()
+                self.player_ai_combo_step = (self.player_ai_combo_step + 1) % 8
+                self.player_ai_combo_timer = random.uniform(0.16, 0.3)
 
         return move_vec
 
@@ -2522,6 +2763,220 @@ class SoulSymphony(ShowBase):
 
     def _load_first_sfx(self, base_names: list[str]):
         return load_first_sfx(self, base_names)
+
+    def _load_first_model(self, model_paths: list[str]):
+        for path in model_paths:
+            if not os.path.exists(path):
+                continue
+            try:
+                model_np = self.loader.loadModel(path)
+            except Exception:
+                model_np = None
+            if model_np is not None and not model_np.isEmpty():
+                return model_np
+        return None
+
+    def _create_fallback_cube_model(self) -> NodePath:
+        root = NodePath("fallback-cube")
+        faces = [
+            ((0.0, 0.5, 0.0), (0.0, 0.0, 0.0)),
+            ((0.0, -0.5, 0.0), (180.0, 0.0, 0.0)),
+            ((0.5, 0.0, 0.0), (90.0, 0.0, 0.0)),
+            ((-0.5, 0.0, 0.0), (-90.0, 0.0, 0.0)),
+            ((0.0, 0.0, 0.5), (0.0, -90.0, 0.0)),
+            ((0.0, 0.0, -0.5), (0.0, 90.0, 0.0)),
+        ]
+        for idx, (pos, hpr) in enumerate(faces):
+            cm = CardMaker(f"fallback-cube-face-{idx}")
+            cm.setFrame(-0.5, 0.5, -0.5, 0.5)
+            face_np = root.attachNewNode(cm.generate())
+            face_np.setPos(*pos)
+            face_np.setHpr(*hpr)
+            face_np.setTwoSided(True)
+        return root
+
+    def _create_fallback_sphere_model(self) -> NodePath:
+        lat_segments = 14
+        lon_segments = 20
+        vdata = GeomVertexData("fallback-sphere", GeomVertexFormat.getV3n3t2(), Geom.UHStatic)
+        v_writer = GeomVertexWriter(vdata, "vertex")
+        n_writer = GeomVertexWriter(vdata, "normal")
+        uv_writer = GeomVertexWriter(vdata, "texcoord")
+
+        for lat in range(lat_segments + 1):
+            theta = math.pi * (lat / lat_segments)
+            sin_t = math.sin(theta)
+            cos_t = math.cos(theta)
+            for lon in range(lon_segments + 1):
+                phi = (2.0 * math.pi) * (lon / lon_segments)
+                x = sin_t * math.cos(phi)
+                y = sin_t * math.sin(phi)
+                z = cos_t
+                v_writer.addData3(x * 0.5, y * 0.5, z * 0.5)
+                n_writer.addData3(x, y, z)
+                uv_writer.addData2(lon / lon_segments, 1.0 - (lat / lat_segments))
+
+        tris = GeomTriangles(Geom.UHStatic)
+        row = lon_segments + 1
+        for lat in range(lat_segments):
+            for lon in range(lon_segments):
+                a = lat * row + lon
+                b = a + 1
+                c = (lat + 1) * row + lon
+                d = c + 1
+                tris.addVertices(a, c, b)
+                tris.addVertices(b, c, d)
+
+        geom = Geom(vdata)
+        geom.addPrimitive(tris)
+        node = GeomNode("fallback-sphere")
+        node.addGeom(geom)
+        return NodePath(node)
+
+    def _create_fallback_cylinder_model(self, radius: float = 0.5, height: float = 1.0, segments: int = 20) -> NodePath:
+        seg = max(8, int(segments))
+        half_h = max(0.05, float(height) * 0.5)
+        vdata = GeomVertexData("fallback-cylinder", GeomVertexFormat.getV3n3t2(), Geom.UHStatic)
+        v_writer = GeomVertexWriter(vdata, "vertex")
+        n_writer = GeomVertexWriter(vdata, "normal")
+        uv_writer = GeomVertexWriter(vdata, "texcoord")
+        tris = GeomTriangles(Geom.UHStatic)
+
+        side_top_idx: list[int] = []
+        side_bottom_idx: list[int] = []
+        for i in range(seg + 1):
+            t = i / seg
+            ang = math.tau * t
+            cx = math.cos(ang)
+            cy = math.sin(ang)
+            nx = cx
+            ny = cy
+
+            top_idx = v_writer.getWriteRow()
+            v_writer.addData3(cx * radius, cy * radius, half_h)
+            n_writer.addData3(nx, ny, 0.0)
+            uv_writer.addData2(t, 1.0)
+            side_top_idx.append(top_idx)
+
+            bot_idx = v_writer.getWriteRow()
+            v_writer.addData3(cx * radius, cy * radius, -half_h)
+            n_writer.addData3(nx, ny, 0.0)
+            uv_writer.addData2(t, 0.0)
+            side_bottom_idx.append(bot_idx)
+
+        for i in range(seg):
+            a = side_top_idx[i]
+            b = side_top_idx[i + 1]
+            c = side_bottom_idx[i]
+            d = side_bottom_idx[i + 1]
+            tris.addVertices(a, c, b)
+            tris.addVertices(b, c, d)
+
+        top_center = v_writer.getWriteRow()
+        v_writer.addData3(0.0, 0.0, half_h)
+        n_writer.addData3(0.0, 0.0, 1.0)
+        uv_writer.addData2(0.5, 0.5)
+        top_ring: list[int] = []
+        for i in range(seg + 1):
+            t = i / seg
+            ang = math.tau * t
+            cx = math.cos(ang)
+            cy = math.sin(ang)
+            idx = v_writer.getWriteRow()
+            v_writer.addData3(cx * radius, cy * radius, half_h)
+            n_writer.addData3(0.0, 0.0, 1.0)
+            uv_writer.addData2(0.5 + 0.5 * cx, 0.5 + 0.5 * cy)
+            top_ring.append(idx)
+        for i in range(seg):
+            tris.addVertices(top_center, top_ring[i], top_ring[i + 1])
+
+        bottom_center = v_writer.getWriteRow()
+        v_writer.addData3(0.0, 0.0, -half_h)
+        n_writer.addData3(0.0, 0.0, -1.0)
+        uv_writer.addData2(0.5, 0.5)
+        bottom_ring: list[int] = []
+        for i in range(seg + 1):
+            t = i / seg
+            ang = math.tau * t
+            cx = math.cos(ang)
+            cy = math.sin(ang)
+            idx = v_writer.getWriteRow()
+            v_writer.addData3(cx * radius, cy * radius, -half_h)
+            n_writer.addData3(0.0, 0.0, -1.0)
+            uv_writer.addData2(0.5 + 0.5 * cx, 0.5 + 0.5 * cy)
+            bottom_ring.append(idx)
+        for i in range(seg):
+            tris.addVertices(bottom_center, bottom_ring[i + 1], bottom_ring[i])
+
+        geom = Geom(vdata)
+        geom.addPrimitive(tris)
+        node = GeomNode("fallback-cylinder")
+        node.addGeom(geom)
+        return NodePath(node)
+
+    def _create_fallback_cone_model(self, radius: float = 0.5, height: float = 1.0, segments: int = 20) -> NodePath:
+        seg = max(8, int(segments))
+        half_h = max(0.05, float(height) * 0.5)
+        tip_z = half_h
+        base_z = -half_h
+        slope = max(1e-6, math.sqrt(radius * radius + height * height))
+        nx_scale = float(height) / slope
+        nz_base = float(radius) / slope
+
+        vdata = GeomVertexData("fallback-cone", GeomVertexFormat.getV3n3t2(), Geom.UHStatic)
+        v_writer = GeomVertexWriter(vdata, "vertex")
+        n_writer = GeomVertexWriter(vdata, "normal")
+        uv_writer = GeomVertexWriter(vdata, "texcoord")
+        tris = GeomTriangles(Geom.UHStatic)
+
+        tip_ring: list[int] = []
+        base_ring: list[int] = []
+        for i in range(seg + 1):
+            t = i / seg
+            ang = math.tau * t
+            cx = math.cos(ang)
+            cy = math.sin(ang)
+            nx = cx * nx_scale
+            ny = cy * nx_scale
+
+            tip_idx = v_writer.getWriteRow()
+            v_writer.addData3(0.0, 0.0, tip_z)
+            n_writer.addData3(nx, ny, nz_base)
+            uv_writer.addData2(t, 1.0)
+            tip_ring.append(tip_idx)
+
+            base_idx = v_writer.getWriteRow()
+            v_writer.addData3(cx * radius, cy * radius, base_z)
+            n_writer.addData3(nx, ny, nz_base)
+            uv_writer.addData2(t, 0.0)
+            base_ring.append(base_idx)
+
+        for i in range(seg):
+            tris.addVertices(tip_ring[i], base_ring[i], base_ring[i + 1])
+
+        base_center = v_writer.getWriteRow()
+        v_writer.addData3(0.0, 0.0, base_z)
+        n_writer.addData3(0.0, 0.0, -1.0)
+        uv_writer.addData2(0.5, 0.5)
+        base_cap: list[int] = []
+        for i in range(seg + 1):
+            t = i / seg
+            ang = math.tau * t
+            cx = math.cos(ang)
+            cy = math.sin(ang)
+            idx = v_writer.getWriteRow()
+            v_writer.addData3(cx * radius, cy * radius, base_z)
+            n_writer.addData3(0.0, 0.0, -1.0)
+            uv_writer.addData2(0.5 + 0.5 * cx, 0.5 + 0.5 * cy)
+            base_cap.append(idx)
+        for i in range(seg):
+            tris.addVertices(base_center, base_cap[i + 1], base_cap[i])
+
+        geom = Geom(vdata)
+        geom.addPrimitive(tris)
+        node = GeomNode("fallback-cone")
+        node.addGeom(geom)
+        return NodePath(node)
 
     def _load_first_sfx_2d(self, base_names: list[str]):
         for base in base_names:
@@ -3043,6 +3498,68 @@ class SoulSymphony(ShowBase):
         tex.setAnisotropicDegree(2)
         return tex
 
+    def _create_radial_mirrored_rainbow_texture(self, size: int = 256) -> Texture:
+        img = PNMImage(size, size, 4)
+        inv = 1.0 / max(1.0, float(size - 1))
+        for y in range(size):
+            v = y * inv * 2.0 - 1.0
+            for x in range(size):
+                u = x * inv * 2.0 - 1.0
+                r = math.sqrt(u * u + v * v)
+                if r > 1.0:
+                    img.setXelA(x, y, 0.0, 0.0, 0.0, 0.0)
+                    continue
+
+                mirrored = abs(((r * 2.8) % 2.0) - 1.0)
+                hue = mirrored
+                rr, gg, bb = colorsys.hsv_to_rgb(hue, 0.95, 1.0)
+
+                ring = math.exp(-((r - 0.82) / 0.12) ** 2)
+                inner = math.exp(-((r - 0.55) / 0.18) ** 2) * 0.38
+                alpha = max(0.0, min(1.0, ring + inner))
+                img.setXelA(x, y, rr, gg, bb, alpha)
+
+        tex = Texture("anomaly-radial-mirrored-rainbow")
+        tex.load(img)
+        tex.setWrapU(Texture.WMRepeat)
+        tex.setWrapV(Texture.WMRepeat)
+        tex.setMinfilter(Texture.FTLinearMipmapLinear)
+        tex.setMagfilter(Texture.FTLinear)
+        tex.setAnisotropicDegree(2 if not self.performance_mode else 1)
+        return tex
+
+    def _create_angular_dial_texture(self, size: int = 256) -> Texture:
+        img = PNMImage(size, size, 4)
+        inv = 1.0 / max(1.0, float(size - 1))
+        for y in range(size):
+            v = y * inv * 2.0 - 1.0
+            for x in range(size):
+                u = x * inv * 2.0 - 1.0
+                r = math.sqrt(u * u + v * v)
+                if r > 1.0:
+                    img.setXelA(x, y, 0.0, 0.0, 0.0, 0.0)
+                    continue
+
+                ang = (math.atan2(v, u) / math.tau) % 1.0
+                rr, gg, bb = colorsys.hsv_to_rgb(ang, 0.9, 1.0)
+
+                ring = math.exp(-((r - 0.82) / 0.1) ** 2)
+                dial_band = math.exp(-((r - 0.62) / 0.08) ** 2) * 0.65
+                pointer = max(0.0, 1.0 - abs((ang - 0.0 + 0.5) % 1.0 - 0.5) / 0.05)
+                pointer *= math.exp(-((r - 0.76) / 0.22) ** 2)
+                alpha = max(0.0, min(1.0, ring + dial_band + pointer * 0.95))
+
+                img.setXelA(x, y, rr, gg, bb, alpha)
+
+        tex = Texture("anomaly-angular-dial")
+        tex.load(img)
+        tex.setWrapU(Texture.WMRepeat)
+        tex.setWrapV(Texture.WMRepeat)
+        tex.setMinfilter(Texture.FTLinearMipmapLinear)
+        tex.setMagfilter(Texture.FTLinear)
+        tex.setAnisotropicDegree(2 if not self.performance_mode else 1)
+        return tex
+
     def _setup_toon_rendering(self) -> None:
         if getattr(self, "safe_render_mode", False):
             self.render.setShaderOff(1)
@@ -3074,6 +3591,16 @@ class SoulSymphony(ShowBase):
             node.clearTexGen()
         node.setTexScale(self.ball_tex_stage, max(0.1, float(uv_scale)), max(0.1, float(uv_scale)), 1.0)
         node.setTexOffset(self.ball_tex_stage, float(uv_offset_u) % 1.0, float(uv_offset_v) % 1.0)
+
+    def _apply_water_cube_projection(self, node: NodePath, uv_scale: float = 2.2, uv_offset_u: float = 0.09, uv_offset_v: float = 0.23) -> None:
+        if node is None or node.isEmpty():
+            return
+        try:
+            node.clearTexGen()
+        except Exception:
+            node.clearTexGen()
+        node.setTexScale(self.water_tex_stage, 1.0, 1.0, 1.0)
+        node.setTexOffset(self.water_tex_stage, 0.0, 0.0)
 
     def _update_ball_texture_scroll(self, dt: float) -> None:
         ball_visual = getattr(self, "ball_visual", None)
@@ -3224,9 +3751,11 @@ class SoulSymphony(ShowBase):
                 wave_v = math.cos((entry["center"].y * 0.11) - t * (0.57 + speed * 0.28) + phase * 1.13) * distort
                 u = (u + wave_u) % 1.0
                 v = (v + wave_v) % 1.0
-                pulse_scale = 1.0 + (abs(wave_u) + abs(wave_v)) * 0.45
-                ru = max(0.02, ru * pulse_scale)
-                rv = max(0.02, rv * pulse_scale)
+                if not is_water:
+                    pulse_gain = 0.45
+                    pulse_scale = 1.0 + (abs(wave_u) + abs(wave_v)) * pulse_gain
+                    ru = max(0.02, ru * pulse_scale)
+                    rv = max(0.02, rv * pulse_scale)
 
                 center = entry["center"]
                 pulse_strength = 0.0
@@ -3285,7 +3814,7 @@ class SoulSymphony(ShowBase):
                         entry["water_cycle_col"] = smoothed_col
                         node.setColor(smoothed_col)
                     else:
-                        node.setColor(0.46, 0.72, 0.92, 0.34)
+                        node.setColor(0.26, 0.46, 0.72, 0.56)
 
                 layer_a = entry.get("layer_a")
                 layer_b = entry.get("layer_b")
@@ -3295,6 +3824,9 @@ class SoulSymphony(ShowBase):
                     node.setTexOffset(layer_a, pulse_u, pulse_v)
                     max_a = 0.42 if not is_water else 0.58
                     gain = float(getattr(self, "texture_layer_additive_gain", 0.42))
+                    if is_water:
+                        gain *= float(getattr(self, "water_additive_gain_scale", 0.62))
+                        max_a *= self._clamp(float(getattr(self, "water_additive_opacity_scale", 0.34)), 0.0, 1.0)
                     layer_a.setColor((gain, gain, gain, max(0.0, min(max_a, pulse_strength * max_a))))
                 if layer_b is not None:
                     under_scale = 0.92 + pulse_strength * (1.2 + cycle_wave * 0.55)
@@ -3305,6 +3837,11 @@ class SoulSymphony(ShowBase):
                     min_b = 0.08 if not is_water else 0.14
                     max_b = 0.38 if not is_water else 0.52
                     gain = float(getattr(self, "texture_layer_additive_gain", 0.42))
+                    if is_water:
+                        gain *= float(getattr(self, "water_additive_gain_scale", 0.62))
+                        op_scale = self._clamp(float(getattr(self, "water_additive_opacity_scale", 0.34)), 0.0, 1.0)
+                        min_b *= op_scale
+                        max_b *= op_scale
                     layer_b.setColor((gain, gain, gain, max(min_b, min(max_b, (1.0 - pulse_strength) * 0.34 + pulse_strength * 0.24))))
                 if layer_c is not None:
                     if is_water:
@@ -3321,13 +3858,16 @@ class SoulSymphony(ShowBase):
                         node.setTexScale(layer_c, max(0.02, base_ru * cycle_scale), max(0.02, base_rv * cycle_scale))
                         node.setTexOffset(layer_c, (base_u + cycle_phase * 0.31) % 1.0, (base_v + cycle_phase * 0.27) % 1.0)
                     gain = float(getattr(self, "texture_layer_additive_gain", 0.42))
+                    if is_water:
+                        gain *= float(getattr(self, "water_additive_gain_scale", 0.62))
                     if is_water and bool(getattr(self, "water_color_cycle_enabled", True)):
+                        op_scale = self._clamp(float(getattr(self, "water_additive_opacity_scale", 0.34)), 0.0, 1.0)
                         smoothness = self._clamp(float(getattr(self, "water_color_cycle_smoothness", 0.24)), 0.0, 1.0)
                         spec_target = (
                             gain * (0.52 + wr * 0.95),
                             gain * (0.52 + wg * 0.95),
                             gain * (0.52 + wb * 0.95),
-                            max(0.0, min(1.0, cycle_alpha)),
+                            max(0.0, min(1.0, cycle_alpha * op_scale)),
                         )
                         prev_spec = entry.get("water_spec_cycle_col")
                         if not isinstance(prev_spec, tuple) or len(prev_spec) != 4:
@@ -3342,6 +3882,8 @@ class SoulSymphony(ShowBase):
                         entry["water_spec_cycle_col"] = spec_col
                         layer_c.setColor(spec_col)
                     else:
+                        if is_water:
+                            cycle_alpha *= self._clamp(float(getattr(self, "water_additive_opacity_scale", 0.34)), 0.0, 1.0)
                         layer_c.setColor((gain, gain, gain, max(0.0, min(1.0, cycle_alpha))))
 
             if mode in ("wall", "ceiling"):
@@ -3493,10 +4035,17 @@ class SoulSymphony(ShowBase):
 
         if bool(getattr(self, "force_single_opaque_additive_texture", False)):
             layer_c = None
-            if forced_mode == "water":
-                stage = TextureStage.getDefault()
+            if forced_mode in ("floor", "ceiling", "wall", "water"):
+                mode = forced_mode
+            elif normal_axis == "x" or normal_axis == "y":
+                mode = "wall"
             else:
-                stage = getattr(self, "level_additive_stage", TextureStage.getDefault())
+                mode = "ceiling" if pos.z > (self.floor_y + self.wall_h * 0.55) else "floor"
+
+            if mode == "water":
+                stage = self.water_tex_stage
+            else:
+                stage = TextureStage.getDefault()
             node.clearTexture()
             node.clearShader()
             node.setColor(1.0, 1.0, 1.0, 1.0)
@@ -3506,25 +4055,44 @@ class SoulSymphony(ShowBase):
                 node.setTransparency(TransparencyAttrib.MNone)
             except Exception:
                 pass
-            try:
-                node.setTexGen(stage, TexGenAttrib.MWorldPosition)
-            except Exception:
+            if mode in ("water", "floor"):
                 node.clearTexGen()
-            if forced_mode == "water":
-                node.setTexture(stage, self.floor_fractal_tex_b, 1)
+            else:
+                try:
+                    node.setTexGen(stage, TexGenAttrib.MWorldPosition)
+                except Exception:
+                    node.clearTexGen()
+            if mode == "water":
+                node.setTexture(stage, self.water_base_tex, 1)
+            elif mode in ("floor", "wall", "ceiling"):
+                node.setTexture(stage, self._get_random_room_texture(), 1)
             else:
                 node.setTexture(stage, self.level_checker_tex, 1)
             cube_repeat = max(0.08, min(0.62, (u_repeat + v_repeat) * 0.06))
-            if forced_mode == "water":
-                cube_repeat *= float(getattr(self, "water_uv_repeat_scale", 3.2))
-            node.setTexScale(stage, cube_repeat, cube_repeat, cube_repeat)
-            node.setTexOffset(stage, off_u, off_v)
+            if mode == "water":
+                cube_repeat = min(12.0, max(1.0, float(getattr(self, "water_uv_repeat_scale", 3.2)) * 0.6))
+                self._apply_water_cube_projection(node, uv_scale=cube_repeat, uv_offset_u=off_u, uv_offset_v=off_v)
+            elif mode == "floor":
+                floor_repeat = max(1.0, float(getattr(self, "room_floor_uv_repeat_scale", 100.0)))
+                node.setTexScale(stage, floor_repeat, floor_repeat, 1.0)
+                node.setTexOffset(stage, off_u, off_v)
+            else:
+                node.setTexScale(stage, cube_repeat, cube_repeat, cube_repeat)
+                node.setTexOffset(stage, off_u, off_v)
 
-            if forced_mode == "water":
-                node.setColor(0.46, 0.72, 0.92, 0.34)
+            if mode == "water":
+                node.setColor(0.46, 0.72, 0.92, 0.14)
                 node.setTransparency(TransparencyAttrib.MAlpha)
                 node.setDepthWrite(False)
                 node.setBin("transparent", 33)
+                node.setAttrib(
+                    ColorBlendAttrib.make(
+                        ColorBlendAttrib.MAdd,
+                        ColorBlendAttrib.OIncomingAlpha,
+                        ColorBlendAttrib.OOne,
+                    ),
+                    1,
+                )
 
                 layer_c = TextureStage(f"water-spec-c-{len(self.dynamic_room_uv_nodes)}")
                 layer_c.setMode(TextureStage.MAdd)
@@ -3538,7 +4106,7 @@ class SoulSymphony(ShowBase):
                 spec_strength = self._clamp(float(getattr(self, "water_specular_strength", 0.72)), 0.0, 1.0)
                 layer_c.setColor((gain, gain, gain, 0.16 + spec_strength * 0.26))
 
-            if forced_mode == "water":
+            if mode == "water":
                 self.dynamic_room_uv_nodes.append(
                     {
                         "node": node,
@@ -3560,7 +4128,7 @@ class SoulSymphony(ShowBase):
                         "water_spec_speed": float(getattr(self, "water_specular_scroll_speed", 1.85)),
                     }
                 )
-            elif self.animate_non_water_uv and forced_mode != "water":
+            elif self.animate_non_water_uv and mode != "water":
                 self.dynamic_room_uv_nodes.append(
                     {
                         "node": node,
@@ -3603,22 +4171,37 @@ class SoulSymphony(ShowBase):
                 u_repeat = water_repeat
                 v_repeat = water_repeat
             else:
-                u_repeat = 0.085
-                v_repeat = 0.085
+                floor_repeat = max(1.0, float(getattr(self, "room_floor_uv_repeat_scale", 100.0)))
+                u_repeat = floor_repeat
+                v_repeat = floor_repeat
             off_u = 0.0
             off_v = 0.0
-            try:
-                node.setTexGen(stage, TexGenAttrib.MWorldPosition)
-            except Exception:
-                node.clearTexGen()
-            node.setTexScale(stage, u_repeat, v_repeat)
-            node.setTexOffset(stage, off_u, off_v)
-            node.setTexture(self.floor_fractal_tex_a if mode == "floor" else self.floor_fractal_tex_b, 1)
             if mode == "water":
-                node.setColor(0.46, 0.72, 0.92, 0.34)
+                stage = self.water_tex_stage
+                node.clearTexture()
+                node.setTexture(stage, self.water_base_tex, 1)
+                self._apply_water_cube_projection(node, uv_scale=max(0.1, u_repeat), uv_offset_u=off_u, uv_offset_v=off_v)
+            else:
+                try:
+                    node.setTexGen(stage, TexGenAttrib.MWorldPosition)
+                except Exception:
+                    node.clearTexGen()
+                node.setTexScale(stage, u_repeat, v_repeat)
+                node.setTexOffset(stage, off_u, off_v)
+                node.setTexture(self.floor_fractal_tex_a, 1)
+            if mode == "water":
+                node.setColor(0.46, 0.72, 0.92, 0.14)
                 node.setTransparency(TransparencyAttrib.MAlpha)
                 node.setDepthWrite(False)
                 node.setBin("transparent", 33)
+                node.setAttrib(
+                    ColorBlendAttrib.make(
+                        ColorBlendAttrib.MAdd,
+                        ColorBlendAttrib.OIncomingAlpha,
+                        ColorBlendAttrib.OOne,
+                    ),
+                    1,
+                )
                 if bool(getattr(self, "water_emissive_linux_enabled", False)):
                     emissive_scale = max(1.0, float(getattr(self, "water_emissive_linux_scale", 1.35)))
                     node.setLightOff(1)
@@ -3650,11 +4233,11 @@ class SoulSymphony(ShowBase):
         layer_a = None
         layer_b = None
         layer_c = None
-        if (not getattr(self, "single_texture_per_cube", False)) and (mode == "water" or (mode == "floor" and self.animate_non_water_uv and self.floor_wet_shader is None)):
+        if (not getattr(self, "single_texture_per_cube", False)) and (mode == "floor" and self.animate_non_water_uv and self.floor_wet_shader is None):
             node.setTransparency(TransparencyAttrib.MAlpha)
 
             layer_a = TextureStage(f"floor-ripple-a-{len(self.dynamic_room_uv_nodes)}")
-            layer_a.setMode(TextureStage.MAdd)
+            layer_a.setMode(TextureStage.MModulate if mode == "water" else TextureStage.MAdd)
             layer_a.setSort(40)
             node.setTexture(layer_a, self.floor_fractal_tex_a, 40)
             try:
@@ -3662,10 +4245,15 @@ class SoulSymphony(ShowBase):
             except Exception:
                 pass
             gain = float(getattr(self, "texture_layer_additive_gain", 0.42))
-            layer_a.setColor((gain, gain, gain, 0.0 if mode == "floor" else 0.08))
+            if mode == "water":
+                gain *= float(getattr(self, "water_additive_gain_scale", 0.62))
+                op_scale = self._clamp(float(getattr(self, "water_additive_opacity_scale", 0.34)), 0.0, 1.0)
+                layer_a.setColor((gain, gain, gain, 0.08 * op_scale))
+            else:
+                layer_a.setColor((gain, gain, gain, 0.0))
 
             layer_b = TextureStage(f"floor-ripple-b-{len(self.dynamic_room_uv_nodes)}")
-            layer_b.setMode(TextureStage.MAdd)
+            layer_b.setMode(TextureStage.MModulate if mode == "water" else TextureStage.MAdd)
             layer_b.setSort(41)
             node.setTexture(layer_b, self.floor_fractal_tex_b, 41)
             try:
@@ -3673,11 +4261,16 @@ class SoulSymphony(ShowBase):
             except Exception:
                 pass
             gain = float(getattr(self, "texture_layer_additive_gain", 0.42))
-            layer_b.setColor((gain, gain, gain, 0.0 if mode == "floor" else 0.14))
+            if mode == "water":
+                gain *= float(getattr(self, "water_additive_gain_scale", 0.62))
+                op_scale = self._clamp(float(getattr(self, "water_additive_opacity_scale", 0.34)), 0.0, 1.0)
+                layer_b.setColor((gain, gain, gain, 0.14 * op_scale))
+            else:
+                layer_b.setColor((gain, gain, gain, 0.0))
 
             if mode == "water":
                 layer_c = TextureStage(f"water-spec-c-{len(self.dynamic_room_uv_nodes)}")
-                layer_c.setMode(TextureStage.MAdd)
+                layer_c.setMode(TextureStage.MModulate)
                 layer_c.setSort(42)
                 node.setTexture(layer_c, self.water_specular_tex, 42)
                 try:
@@ -3685,8 +4278,10 @@ class SoulSymphony(ShowBase):
                 except Exception:
                     pass
                 gain = float(getattr(self, "texture_layer_additive_gain", 0.42))
+                gain *= float(getattr(self, "water_additive_gain_scale", 0.62))
                 spec_strength = self._clamp(float(getattr(self, "water_specular_strength", 0.72)), 0.0, 1.0)
-                layer_c.setColor((gain, gain, gain, 0.16 + spec_strength * 0.26))
+                op_scale = self._clamp(float(getattr(self, "water_additive_opacity_scale", 0.34)), 0.0, 1.0)
+                layer_c.setColor((gain, gain, gain, (0.16 + spec_strength * 0.26) * op_scale))
 
         should_track_dynamic_uv = mode == "water" or self.animate_non_water_uv
         if not should_track_dynamic_uv:
@@ -3853,6 +4448,440 @@ class SoulSymphony(ShowBase):
             node.setAlphaScale(max(0.0, entry["alpha"] * (1.0 - t) * (1.0 - t)))
             keep.append(entry)
         self.motion_trails = keep
+
+    def _setup_magic_missile_visuals(self) -> None:
+        cylinder_model = self._load_first_model([
+            "models/misc/cylinder",
+            "models/misc/cylinder.egg",
+            "models/cylinder",
+            "models/cylinder.egg",
+        ])
+        if cylinder_model is None:
+            cylinder_model = self._create_fallback_cylinder_model()
+        cone_model = self._load_first_model([
+            "models/misc/cone",
+            "models/misc/cone.egg",
+            "models/cone",
+            "models/cone.egg",
+        ])
+        if cone_model is None:
+            cone_model = self._create_fallback_cone_model()
+
+        self.magic_missile_cylinder_model = cylinder_model
+        self.magic_missile_cone_model = cone_model
+
+        if self.magic_missile_template is not None and (not self.magic_missile_template.isEmpty()):
+            self.magic_missile_template.removeNode()
+        template = self.render.attachNewNode("magic-missile-template")
+        template.hide()
+
+        emissive_strength = max(0.0, float(getattr(self, "magic_missile_emissive_strength", 1.0)))
+        body_material = Material()
+        body_material.setEmission((0.45 * emissive_strength, 0.95 * emissive_strength, 1.0 * emissive_strength, 1.0))
+        nose_material = Material()
+        nose_material.setEmission((1.0 * emissive_strength, 1.0 * emissive_strength, 0.65 * emissive_strength, 1.0))
+        flare_material = Material()
+        flare_material.setEmission((0.8 * emissive_strength, 1.0 * emissive_strength, 1.0 * emissive_strength, 1.0))
+
+        body = self.box_model.copyTo(template)
+        body.setName("mm-body")
+        body.clearTexture()
+        body.setColor(0.25, 0.9, 1.0, 1.0)
+        body.setScale(0.42, 0.42, 1.35)
+        body.setPos(0.0, 0.0, 0.0)
+        body.setHpr(45.0, 24.0, 45.0)
+        body.clearTransparency()
+        body.setLightOff(1)
+        body.setShaderOff(1)
+        body.setTwoSided(True)
+        body.setMaterial(body_material, 1)
+        body.setDepthWrite(True)
+        body.setDepthTest(True)
+        body.setBin("fixed", 41)
+        body.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne,
+            ),
+            1,
+        )
+
+        nose = self.magic_missile_cone_model.copyTo(template)
+        nose.setName("mm-nose")
+        nose.clearTexture()
+        nose.setColor(0.95, 1.0, 0.7, 0.98)
+        nose.setScale(0.34, 0.34, 0.62)
+        nose.setPos(0.0, 0.0, 1.45)
+        nose.setTransparency(TransparencyAttrib.MAlpha)
+        nose.setLightOff(1)
+        nose.setShaderOff(1)
+        nose.setMaterial(nose_material, 1)
+        nose.setDepthWrite(True)
+        nose.setDepthTest(True)
+        nose.setBin("fixed", 42)
+        nose.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne,
+            ),
+            1,
+        )
+
+        flare = self.sphere_model.copyTo(template)
+        flare.setName("mm-flare")
+        flare.clearTexture()
+        flare.setColor(0.45, 1.0, 1.0, 0.52)
+        flare.setScale(0.62, 0.62, 0.42)
+        flare.setPos(0.0, 0.0, 0.1)
+        flare.setTransparency(TransparencyAttrib.MAlpha)
+        flare.setDepthWrite(False)
+        flare.setBin("transparent", 20)
+        flare.setLightOff(1)
+        flare.setMaterial(flare_material, 1)
+        flare.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne,
+            ),
+            1,
+        )
+
+        halo = self.sphere_model.copyTo(template)
+        halo.setName("mm-halo")
+        halo.clearTexture()
+        halo.setColor(0.72, 1.0, 1.0, 0.65)
+        halo.setScale(1.0, 1.0, 0.86)
+        halo.setPos(0.0, 0.0, 0.35)
+        halo.setTransparency(TransparencyAttrib.MAlpha)
+        halo.setDepthWrite(False)
+        halo.setDepthTest(False)
+        halo.setBin("transparent", 60)
+        halo.setLightOff(1)
+        halo.setMaterial(flare_material, 1)
+        halo.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne,
+            ),
+            1,
+        )
+
+        self.magic_missile_template = template
+
+    def _on_r_pressed(self) -> None:
+        self.input_hud_r_state = True
+        self.input_hud_r_pulse = 1.0
+        if getattr(self, "game_over_active", False) or getattr(self, "win_active", False):
+            self._restart_after_game_over()
+            return
+        self._trigger_magic_missile_attack()
+
+    def _on_r_released(self) -> None:
+        self.input_hud_r_state = False
+
+    def _on_mouse_button_released(self, button_name: str) -> None:
+        if button_name in self.input_hud_mouse_state:
+            self.input_hud_mouse_state[button_name] = False
+
+    def _on_mouse1_pressed(self) -> None:
+        self.input_hud_mouse_state["mouse1"] = True
+        self._trigger_throw_attack()
+
+    def _on_mouse2_pressed(self) -> None:
+        self.input_hud_mouse_state["mouse2"] = True
+        self._trigger_hyperbomb()
+
+    def _on_mouse3_pressed(self) -> None:
+        self.input_hud_mouse_state["mouse3"] = True
+        self._trigger_spin_attack()
+
+    def _trigger_magic_missile_attack(self) -> None:
+        if self.magic_missile_cooldown > 0.0:
+            return
+        if self.magic_missile_template is None or self.magic_missile_template.isEmpty():
+            self._setup_magic_missile_visuals()
+        if self.magic_missile_template is None or self.magic_missile_template.isEmpty():
+            return
+
+        cast_pos = self._get_hyperbomb_spawn_pos() + Vec3(0.0, 0.0, self.ball_radius * 0.35)
+        forward = Vec3(getattr(self, "last_move_dir", Vec3(0.0, 1.0, 0.0)))
+        if forward.lengthSquared() < 1e-8:
+            forward = self.camera.getQuat(self.render).getForward()
+        forward.z *= 0.2
+        if forward.lengthSquared() < 1e-8:
+            forward = Vec3(0.0, 1.0, 0.0)
+        else:
+            forward.normalize()
+        up = self._get_gravity_up()
+        if up.lengthSquared() < 1e-8:
+            up = Vec3(0.0, 0.0, 1.0)
+        else:
+            up.normalize()
+        right = up.cross(forward)
+        if right.lengthSquared() < 1e-8:
+            right = Vec3(1.0, 0.0, 0.0)
+        else:
+            right.normalize()
+
+        targets = self._get_live_monster_targets()
+        count = max(1, int(getattr(self, "magic_missile_cast_count", 6)))
+        speed = max(1.0, float(getattr(self, "magic_missile_speed", 25.0)))
+        for idx in range(count):
+            missile_np = self.magic_missile_template.copyTo(self.render)
+            spread = (idx - (count - 1) * 0.5)
+            spawn_pos = cast_pos + right * (spread * 0.55) + up * (0.16 * abs(spread))
+            missile_np.setPos(spawn_pos)
+
+            tgt = targets[idx % len(targets)] if targets else None
+            target_pos = tgt.get("root").getPos() if tgt and tgt.get("root") is not None else (spawn_pos + forward * 6.0)
+            dir_vec = target_pos - spawn_pos
+            if dir_vec.lengthSquared() < 1e-8:
+                dir_vec = Vec3(forward)
+            else:
+                dir_vec.normalize()
+            missile_np.lookAt(spawn_pos + dir_vec, up)
+
+            self.magic_missiles.append(
+                {
+                    "node": missile_np,
+                    "body": missile_np.find("**/mm-body"),
+                    "nose": missile_np.find("**/mm-nose"),
+                    "flare": missile_np.find("**/mm-flare"),
+                    "halo": missile_np.find("**/mm-halo"),
+                    "vel": dir_vec * speed,
+                    "age": 0.0,
+                    "life": float(getattr(self, "magic_missile_life", 4.2)),
+                    "target_ref": tgt,
+                    "retarget_timer": random.uniform(0.01, float(getattr(self, "magic_missile_retarget_interval", 0.12))),
+                    "phase": random.uniform(0.0, math.tau),
+                    "launch_up": random.uniform(0.4, 0.95),
+                    "trail_timer": random.uniform(0.0, float(getattr(self, "magic_missile_trail_emit_interval", 0.02))),
+                }
+            )
+
+        self.magic_missile_cooldown = float(getattr(self, "magic_missile_cooldown_duration", 4.5))
+        fire_sfx = self.sfx_attack_homingmissile if self.sfx_attack_homingmissile else self.sfx_attack
+        self._play_sound(fire_sfx, volume=0.7, play_rate=1.25)
+
+    def _get_live_monster_targets(self) -> list[dict]:
+        ball_pos = self.ball_np.getPos() if hasattr(self, "ball_np") and self.ball_np is not None else Vec3(0, 0, 0)
+        targets: list[dict] = []
+        for monster in getattr(self, "monsters", []):
+            if monster.get("dead", False):
+                continue
+            root = monster.get("root")
+            if root is None or root.isEmpty():
+                continue
+            targets.append(monster)
+        targets.sort(key=lambda m: (m.get("root").getPos() - ball_pos).lengthSquared())
+        return targets
+
+    def _find_live_monster_ref(self, target: dict | None) -> dict | None:
+        if target is None:
+            return None
+        if target.get("dead", False):
+            return None
+        root = target.get("root")
+        if root is None or root.isEmpty():
+            return None
+        return target if target in getattr(self, "monsters", []) else None
+
+    def _clear_magic_missiles(self) -> None:
+        for entry in self.magic_missiles:
+            node = entry.get("node")
+            if node is not None and not node.isEmpty():
+                node.removeNode()
+        self.magic_missiles.clear()
+        for entry in self.magic_missile_trails:
+            node = entry.get("node")
+            if node is not None and not node.isEmpty():
+                node.removeNode()
+        self.magic_missile_trails.clear()
+
+    def _spawn_magic_missile_trail(self, pos: Vec3, color: tuple[float, float, float], scale: float = 0.42, life: float = 0.22) -> None:
+        node = self.sphere_model.copyTo(self.render)
+        node.setPos(pos)
+        node.setScale(scale)
+        node.clearTexture()
+        node.setColor(color[0], color[1], color[2], 0.58)
+        node.setTransparency(TransparencyAttrib.MAlpha)
+        node.setDepthWrite(False)
+        node.setDepthTest(False)
+        node.setBin("transparent", 58)
+        node.setLightOff(1)
+        node.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne,
+            ),
+            1,
+        )
+        self.magic_missile_trails.append(
+            {
+                "node": node,
+                "age": 0.0,
+                "life": max(0.05, life),
+                "scale": max(0.05, scale),
+                "alpha": 0.58,
+            }
+        )
+
+    def _update_magic_missile_trails(self, dt: float) -> None:
+        if not self.magic_missile_trails:
+            return
+        keep: list[dict] = []
+        for entry in self.magic_missile_trails:
+            node = entry.get("node")
+            if node is None or node.isEmpty():
+                continue
+            entry["age"] = float(entry.get("age", 0.0)) + dt
+            life = max(0.001, float(entry.get("life", 0.2)))
+            t = self._clamp(entry["age"] / life, 0.0, 1.0)
+            if t >= 1.0:
+                node.removeNode()
+                continue
+            scale = float(entry.get("scale", 0.3)) * (0.84 + t * 0.62)
+            node.setScale(scale)
+            node.setAlphaScale(float(entry.get("alpha", 0.5)) * ((1.0 - t) ** 1.45))
+            keep.append(entry)
+        self.magic_missile_trails = keep
+
+    def _update_magic_missiles(self, dt: float) -> None:
+        if self.magic_missile_cooldown > 0.0:
+            self.magic_missile_cooldown = max(0.0, self.magic_missile_cooldown - dt)
+        if not self.magic_missiles:
+            return
+
+        keep: list[dict] = []
+        speed = max(1.0, float(getattr(self, "magic_missile_speed", 25.0)))
+        turn_rate = max(0.1, float(getattr(self, "magic_missile_turn_rate", 7.6)))
+        color_cycle_rate = max(0.1, float(getattr(self, "magic_missile_color_cycle_rate", 11.5)))
+        hit_radius = 1.15
+        damage = max(1.0, float(getattr(self, "magic_missile_damage", 34.0)))
+        arc_height = max(0.0, float(getattr(self, "magic_missile_arc_height", 0.9)))
+        arc_drop = max(0.0, float(getattr(self, "magic_missile_arc_drop", 1.15)))
+        up = self._get_gravity_up()
+        if up.lengthSquared() < 1e-8:
+            up = Vec3(0.0, 0.0, 1.0)
+        else:
+            up.normalize()
+
+        for entry in self.magic_missiles:
+            node = entry.get("node")
+            if node is None or node.isEmpty():
+                continue
+
+            entry["age"] += dt
+            if entry["age"] >= float(entry.get("life", 4.2)):
+                node.removeNode()
+                continue
+
+            pos = node.getPos()
+            vel = Vec3(entry.get("vel", Vec3(0.0, speed, 0.0)))
+            if vel.lengthSquared() < 1e-8:
+                vel = Vec3(0.0, speed, 0.0)
+            cur_dir = Vec3(vel)
+            cur_dir.normalize()
+
+            entry["retarget_timer"] = float(entry.get("retarget_timer", 0.0)) - dt
+            target = self._find_live_monster_ref(entry.get("target_ref"))
+            if target is None or entry["retarget_timer"] <= 0.0:
+                best = None
+                best_dist_sq = float("inf")
+                for monster in self._get_live_monster_targets():
+                    root = monster.get("root")
+                    if root is None or root.isEmpty():
+                        continue
+                    dist_sq = (root.getPos() - pos).lengthSquared()
+                    if dist_sq < best_dist_sq:
+                        best = monster
+                        best_dist_sq = dist_sq
+                target = best
+                entry["target_ref"] = target
+                entry["retarget_timer"] = float(getattr(self, "magic_missile_retarget_interval", 0.12))
+
+            desired_dir = Vec3(cur_dir)
+            if target is not None:
+                root = target.get("root")
+                target_pos = root.getPos() + Vec3(0.0, 0.0, 0.28)
+                to_target = target_pos - pos
+                if to_target.lengthSquared() > 1e-8:
+                    desired_dir = to_target
+                    desired_dir.normalize()
+
+            life = max(0.001, float(entry.get("life", 4.2)))
+            age_t = self._clamp(float(entry.get("age", 0.0)) / life, 0.0, 1.0)
+            arc_bias = (1.0 - age_t) * arc_height * float(entry.get("launch_up", 0.7)) - age_t * arc_drop
+            desired_dir = desired_dir + up * arc_bias
+            if desired_dir.lengthSquared() > 1e-8:
+                desired_dir.normalize()
+
+            steer = min(1.0, turn_rate * dt)
+            new_dir = cur_dir + (desired_dir - cur_dir) * steer
+            if new_dir.lengthSquared() < 1e-8:
+                new_dir = Vec3(desired_dir)
+            else:
+                new_dir.normalize()
+
+            wobble = 0.08 * math.sin(self.roll_time * 18.0 + float(entry.get("phase", 0.0)))
+            right = up.cross(new_dir)
+            if right.lengthSquared() > 1e-8:
+                right.normalize()
+                new_dir = new_dir + right * wobble
+                if new_dir.lengthSquared() > 1e-8:
+                    new_dir.normalize()
+
+            vel = new_dir * speed
+            next_pos = pos + vel * dt
+            node.setPos(next_pos)
+            node.lookAt(next_pos + new_dir, up)
+            entry["vel"] = vel
+
+            body_np = entry.get("body")
+            nose_np = entry.get("nose")
+            flare_np = entry.get("flare")
+            halo_np = entry.get("halo")
+            hue_base = (self.roll_time * color_cycle_rate + float(entry.get("phase", 0.0)) * 0.37) % 1.0
+            b_r, b_g, b_b = colorsys.hsv_to_rgb(hue_base, 0.92, 1.0)
+            n_r, n_g, n_b = colorsys.hsv_to_rgb((hue_base + 0.12) % 1.0, 0.85, 1.0)
+            f_r, f_g, f_b = colorsys.hsv_to_rgb((hue_base + 0.24) % 1.0, 0.72, 1.0)
+            pulse = 0.72 + 0.28 * math.sin(self.roll_time * 27.0 + float(entry.get("phase", 0.0)) * 2.0)
+            if body_np is not None and not body_np.isEmpty():
+                body_np.setColor(b_r * pulse, b_g * pulse, b_b * pulse, 0.92)
+            if nose_np is not None and not nose_np.isEmpty():
+                nose_np.setColor(n_r, n_g, n_b, 0.96)
+            if flare_np is not None and not flare_np.isEmpty():
+                flare_np.setColor(f_r * 1.1, f_g * 1.1, f_b * 1.1, 0.5)
+                flare_scale = 0.3 + 0.22 * pulse
+                flare_np.setScale(flare_scale, flare_scale, flare_scale)
+            if halo_np is not None and not halo_np.isEmpty():
+                halo_np.setColor(f_r * 1.2, f_g * 1.2, f_b * 1.2, 0.62)
+                halo_scale = 0.82 + 0.34 * pulse
+                halo_np.setScale(halo_scale, halo_scale, halo_scale * 0.86)
+
+            entry["trail_timer"] = float(entry.get("trail_timer", 0.0)) - dt
+            if entry["trail_timer"] <= 0.0:
+                self._spawn_magic_missile_trail(next_pos, (f_r, f_g, f_b), scale=0.42, life=0.2)
+                entry["trail_timer"] += max(0.008, float(getattr(self, "magic_missile_trail_emit_interval", 0.02)))
+
+            if target is not None:
+                root = target.get("root")
+                if root is not None and not root.isEmpty():
+                    hit_dist = hit_radius + float(target.get("radius", 0.6))
+                    if (root.getPos() - next_pos).length() <= hit_dist:
+                        self._damage_monster(target, damage)
+                        self._spawn_motion_trail(next_pos, scale=0.22, color=(0.42, 1.0, 0.95, 0.65), life=0.18, vel=Vec3(0, 0, 0), use_box=False)
+                        node.removeNode()
+                        continue
+
+            keep.append(entry)
+
+        self.magic_missiles = keep
 
     def _trigger_hyperbomb(self) -> None:
         if self.game_over_active or self.win_active:
@@ -4327,6 +5356,32 @@ class SoulSymphony(ShowBase):
 
         return self._get_random_room_texture()
 
+    def _load_water_base_texture(self) -> Texture:
+        candidates: list[str] = []
+        image_exts = (".png", ".jpg", ".jpeg", ".bmp", ".tga")
+        self.water_base_tex_path = "procedural"
+
+        water_dir = "graphics/water"
+        if os.path.isdir(water_dir):
+            for name in sorted(os.listdir(water_dir)):
+                if name.lower().endswith(image_exts):
+                    candidates.append(f"{water_dir}/{name}")
+
+        room_dir = "graphics/rooms"
+        if os.path.isdir(room_dir):
+            for name in sorted(os.listdir(room_dir)):
+                lower = name.lower()
+                if lower.endswith(image_exts) and lower.startswith("water"):
+                    candidates.append(f"{room_dir}/{name}")
+
+        random.shuffle(candidates)
+        for path in candidates:
+            tex = self._get_cached_texture(path)
+            if tex:
+                self.water_base_tex_path = path
+                return tex
+        return self.floor_fractal_tex_b
+
     def _get_ball_uv_params(self, tex: Texture | None) -> tuple[float, float, float]:
         base_scale = 2.1
         u_offset = 0.12
@@ -4456,6 +5511,11 @@ class SoulSymphony(ShowBase):
             return
         trigger_swing_attack(self)
 
+    def _trigger_throw_attack(self) -> None:
+        if self.game_over_active:
+            return
+        trigger_throw_attack(self)
+
     def _trigger_spin_attack(self) -> None:
         if self.game_over_active:
             return
@@ -4514,11 +5574,27 @@ class SoulSymphony(ShowBase):
 
     def _setup_player_health_ui(self) -> None:
         self.player_hp_ui = self.aspect2d.attachNewNode("player-hp-ui")
-        self.player_hp_ui.setPos(-1.28, 0, 0.9)
+        self.player_hp_ui.setPos(-1.28, 0, 0.8)
 
         hp_bg = self._instance_quad(self.player_hp_ui, "player-hp-bg", (0.0, 0.55, -0.04, 0.04))
         hp_bg.setColor(0.05, 0.07, 0.1, 0.86)
         hp_bg.setTransparency(TransparencyAttrib.MAlpha)
+
+        hp_glow = self._instance_quad(self.player_hp_ui, "player-hp-glow", (-0.01, 0.56, -0.05, 0.05))
+        hp_glow.setColor(0.32, 0.95, 1.0, 0.24)
+        hp_glow.setTransparency(TransparencyAttrib.MAlpha)
+        hp_glow.setDepthWrite(False)
+        hp_glow.setDepthTest(False)
+        hp_glow.setBin("fixed", 102)
+        hp_glow.setLightOff(1)
+        hp_glow.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne,
+            ),
+            1,
+        )
 
         fill_root = self.player_hp_ui.attachNewNode("player-hp-fill-root")
         fill_root.setPos(0.01, 0.001, 0)
@@ -4534,6 +5610,11 @@ class SoulSymphony(ShowBase):
         label_np.setScale(0.05)
 
         self.player_hp_fill_root = fill_root
+        self.player_hp_fill_np = hp_fill
+        self.player_hp_bg_np = hp_bg
+        self.player_hp_glow_np = hp_glow
+        self.player_hp_label_text_node = label
+        self.player_hp_label_np = label_np
 
         self.monster_hud_ui = self.aspect2d.attachNewNode("monster-hud-ui")
         self.monster_hud_ui.setPos(0.92, 0, 0.9)
@@ -4547,11 +5628,321 @@ class SoulSymphony(ShowBase):
         self._update_player_health_ui()
         self._update_monster_hud_ui()
 
+    def _setup_input_hud(self) -> None:
+        if not bool(getattr(self, "input_hud_enabled", True)):
+            return
+        if hasattr(self, "input_hud_ui") and self.input_hud_ui is not None and not self.input_hud_ui.isEmpty():
+            self.input_hud_ui.removeNode()
+
+        root = self.aspect2d.attachNewNode("input-hud-ui")
+        root.setPos(-1.22, 0.0, -0.86)
+        root.setBin("fixed", 105)
+        root.setDepthTest(False)
+        root.setDepthWrite(False)
+
+        self.input_hud_buttons = {}
+
+        def add_button(key_name: str, label_text: str, x: float, z: float, parent: NodePath | None = None, frame: tuple[float, float, float, float] | None = None, label_scale: float = 0.042) -> None:
+            host = parent if parent is not None else root
+            holder = host.attachNewNode(f"input-hud-{key_name}")
+            holder.setPos(x, 0.0, z)
+
+            btn_frame = frame if frame is not None else (-0.055, 0.055, -0.042, 0.042)
+            glow_pad_x = 0.015
+            glow_pad_y = 0.01
+
+            bg = self._instance_quad(holder, f"input-hud-bg-{key_name}", btn_frame)
+            bg.setColor(0.06, 0.08, 0.12, 0.64)
+            bg.setTransparency(TransparencyAttrib.MAlpha)
+
+            glow = self._instance_quad(
+                holder,
+                f"input-hud-glow-{key_name}",
+                (
+                    btn_frame[0] - glow_pad_x,
+                    btn_frame[1] + glow_pad_x,
+                    btn_frame[2] - glow_pad_y,
+                    btn_frame[3] + glow_pad_y,
+                ),
+            )
+            glow.setColor(0.28, 0.78, 1.0, 0.0)
+            glow.setTransparency(TransparencyAttrib.MAlpha)
+            glow.setDepthWrite(False)
+            glow.setDepthTest(False)
+            glow.setBin("fixed", 106)
+            glow.setLightOff(1)
+            glow.setAttrib(
+                ColorBlendAttrib.make(
+                    ColorBlendAttrib.MAdd,
+                    ColorBlendAttrib.OIncomingAlpha,
+                    ColorBlendAttrib.OOne,
+                ),
+                1,
+            )
+
+            tn = TextNode(f"input-hud-label-{key_name}")
+            tn.setAlign(TextNode.ACenter)
+            tn.setText(label_text)
+            tn.setTextColor(0.9, 0.94, 1.0, 0.92)
+            label_np = holder.attachNewNode(tn)
+            label_np.setPos(0.0, 0.0, -0.018)
+            label_np.setScale(label_scale)
+
+            self.input_hud_buttons[key_name] = {
+                "holder": holder,
+                "bg": bg,
+                "glow": glow,
+                "label": tn,
+            }
+
+        base_x = 0.0
+        base_z = 0.0
+        spacing = 0.122
+
+        add_button("w", "W", base_x, base_z + spacing)
+        add_button("a", "A", base_x - spacing, base_z)
+        add_button("s", "S", base_x, base_z)
+        add_button("d", "D", base_x + spacing, base_z)
+
+        mouse_root = root.attachNewNode("input-hud-mouse")
+        mouse_root.setPos(base_x + 0.62, 0.0, base_z + 0.03)
+
+        mouse_body = self._instance_quad(mouse_root, "input-hud-mouse-body", (-0.18, 0.18, -0.14, 0.16))
+        mouse_body.setColor(0.04, 0.06, 0.09, 0.72)
+        mouse_body.setTransparency(TransparencyAttrib.MAlpha)
+
+        mouse_wheel_slot = self._instance_quad(mouse_root, "input-hud-mouse-wheel-slot", (-0.03, 0.03, -0.02, 0.08))
+        mouse_wheel_slot.setColor(0.02, 0.03, 0.05, 0.88)
+        mouse_wheel_slot.setTransparency(TransparencyAttrib.MAlpha)
+
+        add_button("mouse1", "L", -0.088, 0.058, parent=mouse_root, frame=(-0.072, 0.072, -0.056, 0.056), label_scale=0.034)
+        add_button("mouse2", "M", 0.0, 0.0, parent=mouse_root, frame=(-0.032, 0.032, -0.04, 0.04), label_scale=0.03)
+        add_button("mouse3", "R", 0.088, 0.058, parent=mouse_root, frame=(-0.072, 0.072, -0.056, 0.056), label_scale=0.034)
+
+        self.input_hud_ui = root
+
+    def _update_input_hud(self, dt: float) -> None:
+        if not bool(getattr(self, "input_hud_enabled", True)):
+            return
+        buttons = getattr(self, "input_hud_buttons", None)
+        if not buttons:
+            return
+
+        self.input_hud_r_pulse = max(0.0, float(getattr(self, "input_hud_r_pulse", 0.0)) - dt * 2.8)
+        hue = (self.roll_time * 0.28) % 1.0
+
+        for key_name, entry in buttons.items():
+            bg = entry.get("bg")
+            glow = entry.get("glow")
+            label = entry.get("label")
+            if bg is None or bg.isEmpty() or glow is None or glow.isEmpty() or not isinstance(label, TextNode):
+                continue
+
+            pressed = False
+            if key_name in self.keys:
+                pressed = bool(self.keys.get(key_name, False))
+            elif key_name in self.camera_keys:
+                pressed = bool(self.camera_keys.get(key_name, False))
+            elif key_name == "r":
+                pressed = bool(getattr(self, "input_hud_r_state", False)) or float(getattr(self, "input_hud_r_pulse", 0.0)) > 0.0
+            elif key_name in self.input_hud_mouse_state:
+                pressed = bool(self.input_hud_mouse_state.get(key_name, False))
+
+            if pressed:
+                key_hue = (hue + 0.19 * (abs(hash(key_name)) % 7)) % 1.0
+                rr, rg, rb = colorsys.hsv_to_rgb(key_hue, 0.72, 1.0)
+                bg.setColor(0.14 + rr * 0.32, 0.15 + rg * 0.34, 0.18 + rb * 0.34, 0.94)
+                glow.setColor(rr, rg, rb, 0.52)
+                label.setTextColor(1.0, 1.0, 1.0, 1.0)
+            else:
+                bg.setColor(0.06, 0.08, 0.12, 0.64)
+                glow.setColor(0.28, 0.78, 1.0, 0.02)
+                label.setTextColor(0.9, 0.94, 1.0, 0.92)
+
+    def _setup_holographic_map_ui(self) -> None:
+        if not bool(getattr(self, "holo_map_enabled", True)):
+            return
+        if self.holo_map_ui is not None and not self.holo_map_ui.isEmpty():
+            self.holo_map_ui.removeNode()
+
+        root = self.aspect2d.attachNewNode("holo-map-ui")
+        root.setPos(1.03, 0.0, -0.66)
+        root.setBin("fixed", 110)
+        root.setDepthTest(False)
+        root.setDepthWrite(False)
+
+        panel = self._instance_quad(root, "holo-map-panel", (-0.28, 0.28, -0.28, 0.28))
+        panel.setColor(0.02, 0.09, 0.12, 0.42)
+        panel.setTransparency(TransparencyAttrib.MAlpha)
+
+        ring = self._instance_quad(root, "holo-map-ring", (-0.295, 0.295, -0.295, 0.295))
+        ring.setColor(0.2, 0.92, 1.0, 0.24)
+        ring.setTransparency(TransparencyAttrib.MAlpha)
+        ring.setLightOff(1)
+        ring.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne,
+            ),
+            1,
+        )
+
+        cross_h = self._instance_quad(root, "holo-map-cross-h", (-0.28, 0.28, -0.0025, 0.0025))
+        cross_h.setColor(0.25, 0.85, 1.0, 0.22)
+        cross_h.setTransparency(TransparencyAttrib.MAlpha)
+        cross_v = self._instance_quad(root, "holo-map-cross-v", (-0.0025, 0.0025, -0.28, 0.28))
+        cross_v.setColor(0.25, 0.85, 1.0, 0.22)
+        cross_v.setTransparency(TransparencyAttrib.MAlpha)
+
+        title = TextNode("holo-map-title")
+        title.setAlign(TextNode.ACenter)
+        title.setText("HOLO MAP")
+        title.setTextColor(0.58, 0.98, 1.0, 0.94)
+        title_np = root.attachNewNode(title)
+        title_np.setPos(0.0, 0.0, 0.325)
+        title_np.setScale(0.04)
+
+        marker_root = root.attachNewNode("holo-map-markers")
+        marker_root.setPos(0.0, 0.0, 0.0)
+
+        self.holo_map_ui = root
+        self.holo_map_marker_root = marker_root
+        self.holo_map_markers = []
+
+    def _add_holo_map_marker(self, x: float, z: float, size: float, color: tuple[float, float, float, float]) -> None:
+        if self.holo_map_marker_root is None or self.holo_map_marker_root.isEmpty():
+            return
+        marker = self._instance_quad(self.holo_map_marker_root, "holo-map-marker", (-size, size, -size, size))
+        marker.setPos(x, 0.0, z)
+        marker.setColor(*color)
+        marker.setTransparency(TransparencyAttrib.MAlpha)
+        marker.setDepthWrite(False)
+        marker.setDepthTest(False)
+        marker.setBin("fixed", 111)
+        marker.setLightOff(1)
+        marker.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne,
+            ),
+            1,
+        )
+        self.holo_map_markers.append(marker)
+
+    def _update_holographic_map_ui(self, dt: float) -> None:
+        if not bool(getattr(self, "holo_map_enabled", True)):
+            return
+        if self.holo_map_ui is None or self.holo_map_ui.isEmpty() or self.holo_map_marker_root is None or self.holo_map_marker_root.isEmpty():
+            return
+        if not hasattr(self, "ball_np") or self.ball_np is None or self.ball_np.isEmpty():
+            return
+
+        panel_pulse = 0.5 + 0.5 * math.sin(self.roll_time * 2.7)
+        self.holo_map_ui.setScale(1.0 + panel_pulse * 0.01)
+
+        self.holo_map_update_timer -= dt
+        if self.holo_map_update_timer > 0.0:
+            return
+        self.holo_map_update_timer = max(1e-3, float(getattr(self, "holo_map_update_interval", 1.0 / 14.0)))
+
+        for marker in self.holo_map_markers:
+            if marker is not None and not marker.isEmpty():
+                marker.removeNode()
+        self.holo_map_markers.clear()
+
+        center = self.ball_np.getPos(self.render)
+        radius = max(6.0, float(getattr(self, "holo_map_radius_world", 36.0)))
+        inv_radius = 1.0 / radius
+        map_scale = 0.26
+
+        def project(world_pos: Vec3) -> tuple[float, float] | None:
+            delta = Vec3(world_pos) - center
+            delta.z = 0.0
+            dist = delta.length()
+            if dist > radius:
+                return None
+            return (delta.x * inv_radius * map_scale, delta.y * inv_radius * map_scale)
+
+        self._add_holo_map_marker(0.0, 0.0, 0.014, (1.0, 1.0, 1.0, 0.95))
+
+        for monster in getattr(self, "monsters", []):
+            if monster.get("dead", False):
+                continue
+            root = monster.get("root")
+            if root is None or root.isEmpty():
+                continue
+            pos2 = project(root.getPos(self.render))
+            if pos2 is None:
+                continue
+            self._add_holo_map_marker(pos2[0], pos2[1], 0.009, (1.0, 0.28, 0.36, 0.9))
+
+        for item in getattr(self, "health_powerups", []):
+            root = item.get("root")
+            if root is None or root.isEmpty():
+                continue
+            pos2 = project(root.getPos(self.render))
+            if pos2 is None:
+                continue
+            self._add_holo_map_marker(pos2[0], pos2[1], 0.008, (0.36, 1.0, 0.5, 0.92))
+
+        for item in getattr(self, "sword_powerups", []):
+            root = item.get("root")
+            if root is None or root.isEmpty():
+                continue
+            pos2 = project(root.getPos(self.render))
+            if pos2 is None:
+                continue
+            self._add_holo_map_marker(pos2[0], pos2[1], 0.008, (0.96, 0.88, 0.28, 0.92))
+
+        for anomaly in getattr(self, "black_holes", []):
+            root = anomaly.get("root")
+            if root is None or root.isEmpty():
+                continue
+            pos2 = project(root.getPos(self.render))
+            if pos2 is None:
+                continue
+            kind = str(anomaly.get("kind", "suck")).lower()
+            if kind == "blow":
+                self._add_holo_map_marker(pos2[0], pos2[1], 0.011, (0.34, 0.78, 1.0, 0.95))
+            else:
+                self._add_holo_map_marker(pos2[0], pos2[1], 0.011, (1.0, 0.44, 0.88, 0.95))
+
+        for landmark in getattr(self, "room_landmarks", []):
+            root = landmark.get("root")
+            if root is None or root.isEmpty():
+                continue
+            pos2 = project(root.getPos(self.render))
+            if pos2 is None:
+                continue
+            self._add_holo_map_marker(pos2[0], pos2[1], 0.007, (0.78, 0.98, 1.0, 0.78))
+
     def _update_player_health_ui(self) -> None:
         if not hasattr(self, "player_hp_fill_root"):
             return
         ratio = max(0.0, min(1.0, self.player_hp / max(1e-6, self.player_hp_max)))
         self.player_hp_fill_root.setScale(ratio, 1.0, 1.0)
+        hue_shift = (self.roll_time * 0.42) % 1.0
+        pulse = 0.5 + 0.5 * math.sin(self.roll_time * 7.2)
+        health_hue = (0.0 + ratio * 0.33 + hue_shift * 0.08) % 1.0
+        fr, fg, fb = colorsys.hsv_to_rgb(health_hue, 0.88, 1.0)
+
+        hp_fill = getattr(self, "player_hp_fill_np", None)
+        if hp_fill is not None and not hp_fill.isEmpty():
+            hp_fill.setColor(fr, fg, fb, 0.88 + 0.1 * pulse)
+
+        hp_glow = getattr(self, "player_hp_glow_np", None)
+        if hp_glow is not None and not hp_glow.isEmpty():
+            glow_hue = (hue_shift + 0.52) % 1.0
+            gr, gg, gb = colorsys.hsv_to_rgb(glow_hue, 0.72, 1.0)
+            hp_glow.setColor(gr, gg, gb, 0.16 + 0.22 * pulse)
+            hp_glow.setScale(1.0 + 0.015 * pulse, 1.0, 1.0)
+
+        label = getattr(self, "player_hp_label_text_node", None)
+        if isinstance(label, TextNode):
+            lr, lg, lb = colorsys.hsv_to_rgb((hue_shift + 0.12) % 1.0, 0.45, 1.0)
+            label.setTextColor(lr, lg, lb, 0.96)
 
     def _update_monster_hud_ui(self) -> None:
         node = getattr(self, "monster_hud_text_node", None)
@@ -4602,9 +5993,26 @@ class SoulSymphony(ShowBase):
         prompt_np = root.attachNewNode(prompt)
         prompt_np.setPos(0.0, 0.0, -0.075)
         prompt_np.setScale(0.055)
+        self.game_over_prompt_text_node = prompt
+        self._refresh_game_over_prompt()
 
         root.hide()
         self.game_over_ui = root
+
+    def _refresh_game_over_prompt(self) -> None:
+        prompt = getattr(self, "game_over_prompt_text_node", None)
+        if not isinstance(prompt, TextNode):
+            return
+        seconds_left = max(0, int(math.ceil(float(getattr(self, "game_over_countdown", 0.0)))))
+        prompt.setText(f"Press R to restart\nAuto replay AI in {seconds_left}")
+
+    def _update_game_over_countdown(self, dt: float) -> None:
+        if not self.game_over_active:
+            return
+        self.game_over_countdown = max(0.0, float(self.game_over_countdown) - max(0.0, float(dt)))
+        self._refresh_game_over_prompt()
+        if self.game_over_countdown <= 0.0:
+            self._restart_after_game_over()
 
     def _setup_win_ui(self) -> None:
         if self.win_ui is not None and not self.win_ui.isEmpty():
@@ -4642,6 +6050,9 @@ class SoulSymphony(ShowBase):
             return
         self.game_over_active = True
         self.win_active = False
+        self._clear_magic_missiles()
+        self.game_over_countdown = float(getattr(self, "game_over_auto_restart_seconds", 10.0))
+        self._refresh_game_over_prompt()
         self.jump_queued = False
         if hasattr(self, "ball_body") and self.ball_body is not None:
             self.ball_body.setLinearVelocity(Vec3(0, 0, 0))
@@ -4655,6 +6066,7 @@ class SoulSymphony(ShowBase):
             return
         self.win_active = True
         self.game_over_active = False
+        self._clear_magic_missiles()
         self.jump_queued = False
         if hasattr(self, "ball_body") and self.ball_body is not None:
             self.ball_body.setLinearVelocity(Vec3(0, 0, 0))
@@ -4668,6 +6080,10 @@ class SoulSymphony(ShowBase):
             return
         self.game_over_active = False
         self.win_active = False
+        self._clear_magic_missiles()
+        self.magic_missile_cooldown = 0.0
+        self.game_over_countdown = float(getattr(self, "game_over_auto_restart_seconds", 10.0))
+        self._refresh_game_over_prompt()
 
         if self.game_over_ui is not None and not self.game_over_ui.isEmpty():
             self.game_over_ui.hide()
@@ -4790,7 +6206,7 @@ class SoulSymphony(ShowBase):
             keep.append(ring_entry)
         self.kill_protection_rings = keep
 
-    def _apply_player_damage(self, amount: float) -> bool:
+    def _apply_player_damage(self, amount: float, crit_chance_override: float | None = None) -> bool:
         if self.game_over_active:
             return False
         dmg = max(0.0, float(amount))
@@ -4799,7 +6215,10 @@ class SoulSymphony(ShowBase):
         if self._consume_kill_protection():
             return False
 
-        crit_chance = self._clamp(float(getattr(self, "critical_hit_chance_current", 0.08)), 0.0, 0.95)
+        if crit_chance_override is None:
+            crit_chance = self._clamp(float(getattr(self, "critical_hit_chance_current", 0.08)), 0.0, 0.95)
+        else:
+            crit_chance = self._clamp(float(crit_chance_override), 0.0, 0.95)
         is_critical = random.random() < crit_chance
         if is_critical:
             dmg *= max(1.2, float(getattr(self, "critical_hit_multiplier", 2.1)))
@@ -5015,10 +6434,12 @@ class SoulSymphony(ShowBase):
             pos.x = max(x_min, min(x_max, pos.x))
             pos.y = max(y_min, min(y_max, pos.y))
             pos.z = item["base_z"] + 0.42 * math.sin(self.roll_time * 5.4 + item["phase"])
+            can_collect = self.player_hp < self.player_hp_max - 0.01
+            pos = self._apply_pickup_attraction(pos, ball_pos, dt, active=can_collect)
             root.setPos(pos)
             root.setHpr(self.roll_time * 180.0 * item["speed"], 0, 0)
 
-            if (ball_pos - pos).length() < 0.85 and self.player_hp < self.player_hp_max - 0.01:
+            if (ball_pos - pos).length() < 0.85 and can_collect:
                 heal = float(item["heal"])
                 self.player_hp = min(self.player_hp_max, self.player_hp + heal)
                 self._update_player_health_ui()
@@ -5035,6 +6456,21 @@ class SoulSymphony(ShowBase):
                     random.uniform(room.y + 0.9, room.y + room.h - 0.9),
                     item["base_z"],
                 )
+
+    def _apply_pickup_attraction(self, pickup_pos: Vec3, ball_pos: Vec3, dt: float, active: bool = True) -> Vec3:
+        if not active:
+            return pickup_pos
+        to_player = ball_pos - pickup_pos
+        dist = to_player.length()
+        radius = max(0.1, float(getattr(self, "pickup_attract_radius", 3.1)))
+        if dist <= 1e-5 or dist > radius:
+            return pickup_pos
+        proximity = 1.0 - (dist / radius)
+        speed = max(0.0, float(getattr(self, "pickup_attract_speed", 8.2)))
+        step = min(dist, speed * dt * (0.45 + 0.55 * proximity))
+        if step <= 0.0:
+            return pickup_pos
+        return pickup_pos + to_player * (step / dist)
 
     def _spawn_sword_powerup(self, world_pos: Vec3) -> None:
         self.sword_pickup_serial += 1
@@ -5116,7 +6552,9 @@ class SoulSymphony(ShowBase):
 
             base = item.get("base", root.getPos())
             bob = 0.28 * math.sin(self.roll_time * item["speed"] * 3.0 + item["phase"])
-            root.setPos(base + Vec3(0, 0, bob))
+            pos = base + Vec3(0, 0, bob)
+            pos = self._apply_pickup_attraction(pos, ball_pos, dt, active=True)
+            root.setPos(pos)
             root.setHpr(self.roll_time * item["spin"], 0, 0)
 
             if (ball_pos - root.getPos()).length() <= 0.9:
@@ -5184,6 +6622,8 @@ class SoulSymphony(ShowBase):
             return
 
         self._set_monster_state(monster, "hit", announce=True)
+        if bool(monster.get("docile_until_attacked", False)):
+            monster["awakened"] = True
         if root is not None and not root.isEmpty() and hasattr(self, "ball_np"):
             away = root.getPos() - self.ball_np.getPos()
             away.z = 0.0
@@ -5213,6 +6653,7 @@ class SoulSymphony(ShowBase):
         ball_vel = self.ball_body.getLinearVelocity()
         had_contact = False
         strongest_contact = 0.0
+        strongest_crit_chance: float | None = None
         knock_normal_sum = Vec3(0, 0, 0)
 
         for monster in self.monsters:
@@ -5248,10 +6689,16 @@ class SoulSymphony(ShowBase):
             m_pos -= normal * (penetration * 0.38)
             root.setPos(m_pos)
             monster["velocity"] = Vec3(monster["velocity"]) - normal * min(3.2, penetration * 8.5)
-            self._set_monster_state(monster, "attacking")
+            dormant_docile = bool(monster.get("docile_until_attacked", False)) and (not bool(monster.get("awakened", False)))
+            if not dormant_docile:
+                self._set_monster_state(monster, "attacking")
             ball_vel += normal * min(5.5, penetration * 11.0)
             knock_normal_sum += normal * max(0.05, penetration)
-            strongest_contact = max(strongest_contact, float(monster.get("contact_damage", 10.0)))
+            if not dormant_docile:
+                dmg = float(monster.get("contact_damage", 10.0))
+                if dmg > strongest_contact:
+                    strongest_contact = dmg
+                    strongest_crit_chance = float(monster.get("critical_chance", 0.08))
 
         if had_contact:
             self.ball_np.setPos(ball_pos)
@@ -5260,8 +6707,8 @@ class SoulSymphony(ShowBase):
                 self._play_sound(self.sfx_monster_hit, volume=0.42, play_rate=0.96 + random.uniform(-0.06, 0.06))
                 self.monster_contact_sfx_cooldown = 0.1
 
-            if self.player_damage_cooldown <= 0.0:
-                was_critical = self._apply_player_damage(strongest_contact if strongest_contact > 0.0 else 10.0)
+            if self.player_damage_cooldown <= 0.0 and strongest_contact > 0.0:
+                was_critical = self._apply_player_damage(strongest_contact, crit_chance_override=strongest_crit_chance)
                 if knock_normal_sum.lengthSquared() > 1e-8:
                     knock_dir = Vec3(knock_normal_sum)
                     knock_dir.normalize()
@@ -5652,7 +7099,8 @@ class SoulSymphony(ShowBase):
         scale_hint = max(1.0, abs(scale.x) + abs(scale.y) + abs(scale.z))
         target_w = self._compute_level_w(pos) if w_coord is None else w_coord
         self._apply_hypercube_projection(node, target_w, scale_hint=scale_hint)
-        self._register_color_cycle(node, color, min_speed=0.045, max_speed=0.11)
+        if not surface_mode or str(surface_mode).strip().lower() != "water":
+            self._register_color_cycle(node, color, min_speed=0.045, max_speed=0.11)
         self._register_scene_visual(holder, target_w)
 
         body_np = None
@@ -6735,34 +8183,21 @@ class SoulSymphony(ShowBase):
         if self.landmark_model_candidates is None:
             model_extensions = (".bam", ".egg", ".gltf", ".glb", ".obj")
             model_paths: list[str] = []
-            for root, _, files in os.walk("graphics"):
-                for name in files:
-                    if name.lower().endswith(model_extensions):
-                        model_paths.append(os.path.join(root, name).replace("\\", "/"))
+            roots = ["graphics/landmarks", "graphics"]
+            for root_dir in roots:
+                if not os.path.isdir(root_dir):
+                    continue
+                for root, _, files in os.walk(root_dir):
+                    for name in files:
+                        if name.lower().endswith(model_extensions):
+                            path = os.path.join(root, name).replace("\\", "/")
+                            if path not in model_paths:
+                                model_paths.append(path)
             self.landmark_model_candidates = model_paths
 
         if self.landmark_model_candidates:
             return random.choice(self.landmark_model_candidates)
 
-        if self.landmark_fallback_model is not None:
-            return self.landmark_fallback_model
-
-        fallback_models = [
-            "models/teapot",
-            "models/misc/rgbCube",
-            "models/smiley",
-            "models/frowney",
-        ]
-        random.shuffle(fallback_models)
-        for path in fallback_models:
-            try:
-                candidate = self.loader.loadModel(path)
-                if candidate is not None and not candidate.isEmpty():
-                    candidate.removeNode()
-                    self.landmark_fallback_model = path
-                    return path
-            except Exception:
-                continue
         return None
 
     def _setup_room_landmarks(self) -> None:
@@ -6775,48 +8210,407 @@ class SoulSymphony(ShowBase):
             key=lambda idx: self.rooms[idx].w * self.rooms[idx].h,
             reverse=True,
         )
-        room_indices = room_indices[: max(3, min(6, len(room_indices)))]
-
         for room_idx in room_indices:
             room = self.rooms[room_idx]
-            base_z = self._level_base_z(self.room_levels.get(room_idx, 0))
-            center = Vec3(room.x + room.w * 0.5, room.y + room.h * 0.5, base_z + 0.06)
+            room_area = float(room.w * room.h)
+            spawn_count = 1
+            if room_area >= 180.0:
+                spawn_count += 1
+            if not self.performance_mode and room_area >= 320.0:
+                spawn_count += 1
 
-            model_path = self._pick_landmark_model()
-            landmark_root = self.world.attachNewNode(f"landmark-{room_idx}")
-            landmark_root.setPos(center)
-            landmark_root.setH(random.uniform(0.0, 360.0))
-            landmark_root.setCollideMask(BitMask32.allOff())
+            for landmark_idx in range(spawn_count):
+                base_z = self._level_base_z(self.room_levels.get(room_idx, 0))
+                if spawn_count == 1:
+                    center = Vec3(room.x + room.w * 0.5, room.y + room.h * 0.5, base_z + 0.06)
+                else:
+                    margin = 0.16 + 0.05 * min(2, landmark_idx)
+                    center = Vec3(
+                        random.uniform(room.x + room.w * margin, room.x + room.w * (1.0 - margin)),
+                        random.uniform(room.y + room.h * margin, room.y + room.h * (1.0 - margin)),
+                        base_z + 0.06,
+                    )
 
-            model_np = None
-            if model_path is not None:
+                model_path = self._pick_landmark_model()
+                landmark_root = self.world.attachNewNode(f"landmark-{room_idx}-{landmark_idx}")
+                landmark_root.setPos(center)
+                landmark_root.setH(random.uniform(0.0, 360.0))
+                landmark_root.setCollideMask(BitMask32.allOn())
+
+                model_np = None
+                if model_path is not None:
+                    try:
+                        model_np = self.loader.loadModel(model_path)
+                    except Exception:
+                        model_np = None
+
+                if model_np is not None and not model_np.isEmpty():
+                    model_np.reparentTo(landmark_root)
+                    if bool(getattr(self, "landmark_linux_axis_fix", False)):
+                        path_l = str(model_path).lower() if model_path is not None else ""
+                        if path_l.endswith((".gltf", ".glb", ".obj")):
+                            model_np.setP(float(getattr(self, "landmark_linux_axis_fix_degrees", -90.0)))
+                    room_span = max(1.0, min(room.w, room.h))
+                    model_np.setScale(max(0.55, min(1.45, room_span * 0.04)))
+                    model_np.setColor(0.86, 0.92, 1.0, 1.0)
+                    model_np.setTexture(self._get_random_room_texture(), 1)
+                    uv_scale = Vec3(max(0.25, room_span * 0.2), max(0.25, room_span * 0.2), max(0.25, room_span * 0.2))
+                    self._apply_smart_room_uv(model_np, center, uv_scale, surface_mode="floor")
+                else:
+                    pylon = self._add_box(
+                        Vec3(0, 0, 0.62),
+                        Vec3(0.32, 0.32, 0.62),
+                        color=(0.7, 0.78, 0.88, 1.0),
+                        parent=landmark_root,
+                        collidable=False,
+                        surface_mode="floor",
+                    )
+                    orb = self.sphere_model.copyTo(landmark_root)
+                    orb.setScale(0.34)
+                    orb.setPos(0, 0, 1.4)
+                    orb.setColor(0.26, 0.95, 1.0, 0.95)
+                    orb.setTransparency(TransparencyAttrib.MAlpha)
+                    orb.setLightOff(1)
+                    self._register_color_cycle(orb, (0.26, 0.95, 1.0, 0.95), min_speed=0.08, max_speed=0.2)
+                    if pylon is not None and not pylon.isEmpty():
+                        pylon.setCollideMask(BitMask32.allOff())
+
+                collider_half = Vec3(0.34, 0.34, 0.62)
+                collider_center_local = Vec3(0, 0, 0.62)
+                bounds = landmark_root.getTightBounds()
+                if bounds is not None:
+                    bmin, bmax = bounds
+                    if bmin is not None and bmax is not None:
+                        center_local = (bmin + bmax) * 0.5
+                        size = bmax - bmin
+                        collider_center_local = Vec3(center_local)
+                        collider_half = Vec3(
+                            max(0.18, abs(size.x) * 0.5),
+                            max(0.18, abs(size.y) * 0.5),
+                            max(0.28, abs(size.z) * 0.5),
+                        )
+
+                landmark_quat = landmark_root.getQuat(self.render)
+                collider_center_world = landmark_root.getPos(self.render) + landmark_quat.xform(collider_center_local)
+                collider_np = self._add_static_box_collider(
+                    collider_center_world,
+                    collider_half,
+                    hpr=landmark_root.getHpr(self.render),
+                    visual_holder=landmark_root,
+                )
+                collider_np.setName(f"landmark-collider-{room_idx}-{landmark_idx}")
+
+                w_coord = self._compute_level_w(center)
+                self._apply_hypercube_projection(landmark_root, w_coord, scale_hint=max(room.w, room.h) * 0.08)
+                self._register_scene_visual(landmark_root, w_coord)
+                self.room_landmarks.append({"room_idx": room_idx, "root": landmark_root, "collider": collider_np})
+
+    def _spawn_roaming_black_holes(self, count: int = 6) -> None:
+        for entry in getattr(self, "black_holes", []):
+            loop_sfx = entry.get("loop_sfx")
+            if loop_sfx:
                 try:
-                    model_np = self.loader.loadModel(model_path)
+                    loop_sfx.stop()
                 except Exception:
-                    model_np = None
+                    pass
+            root = entry.get("root")
+            if root is not None and not root.isEmpty():
+                root.removeNode()
+        self.black_holes = []
 
-            if model_np is not None and not model_np.isEmpty():
-                model_np.reparentTo(landmark_root)
-                model_np.clearTexture()
-                room_span = max(1.0, min(room.w, room.h))
-                model_np.setScale(max(0.55, min(1.45, room_span * 0.045)))
-                model_np.setColor(0.86, 0.92, 1.0, 1.0)
+        if not self.rooms:
+            return
+
+        if self.black_hole_suck_outline_tex is None:
+            self.black_hole_suck_outline_tex = self._create_radial_mirrored_rainbow_texture(256)
+        if self.black_hole_blow_dial_tex is None:
+            self.black_hole_blow_dial_tex = self._create_angular_dial_texture(256)
+
+        spawn_count = max(1, int(count))
+        blower_ratio = self._clamp(float(getattr(self, "black_hole_blower_ratio", 0.46)), 0.0, 1.0)
+        for idx in range(spawn_count):
+            room_idx = random.randrange(len(self.rooms))
+            room = self.rooms[room_idx]
+            base_z = self._level_base_z(self.room_levels.get(room_idx, 0))
+            margin = 1.1
+            x = random.uniform(room.x + margin, room.x + room.w - margin)
+            y = random.uniform(room.y + margin, room.y + room.h - margin)
+
+            kind = "blow" if random.random() < blower_ratio else "suck"
+            root = self.world.attachNewNode(f"anomaly-{kind}-{idx}")
+            root.setPos(x, y, base_z + 1.35)
+            root.setTransparency(TransparencyAttrib.MAlpha)
+            root.setBin("transparent", 44)
+            root.setDepthWrite(False)
+
+            core = self.sphere_model.copyTo(root)
+            core.setScale(max(0.22, self.black_hole_visual_radius * 0.52))
+            core.clearTexture()
+            core.setLightOff(1)
+            core.setTransparency(TransparencyAttrib.MAlpha)
+            core.setBin("transparent", 47)
+            core.setDepthWrite(False)
+
+            lens = self.sphere_model.copyTo(root)
+            lens.setScale(max(0.55, self.black_hole_visual_radius * 1.18))
+            lens.clearTexture()
+            lens.setTexture(self._get_random_room_texture(), 1)
+            lens.setTexScale(TextureStage.getDefault(), 3.5, 3.5)
+            lens.setLightOff(1)
+            lens.setTransparency(TransparencyAttrib.MAlpha)
+            lens.setBin("transparent", 45)
+            lens.setDepthWrite(False)
+            lens.setAttrib(
+                ColorBlendAttrib.make(
+                    ColorBlendAttrib.MAdd,
+                    ColorBlendAttrib.OIncomingAlpha,
+                    ColorBlendAttrib.OOne,
+                ),
+                1,
+            )
+
+            corona = self.sphere_model.copyTo(root)
+            corona.setScale(max(0.72, self.black_hole_visual_radius * 1.62))
+            corona.clearTexture()
+            corona.setTexture(self._get_random_room_texture(), 1)
+            corona.setTexScale(TextureStage.getDefault(), 5.2, 5.2)
+            corona.setLightOff(1)
+            corona.setTransparency(TransparencyAttrib.MAlpha)
+            corona.setBin("transparent", 46)
+            corona.setDepthWrite(False)
+
+            outline = self.sphere_model.copyTo(root)
+            outline.setScale(max(0.85, self.black_hole_visual_radius * 1.95))
+            outline.clearTexture()
+            outline.setLightOff(1)
+            outline.setTransparency(TransparencyAttrib.MAlpha)
+            outline.setBin("transparent", 48)
+            outline.setDepthWrite(False)
+            outline.setAttrib(
+                ColorBlendAttrib.make(
+                    ColorBlendAttrib.MAdd,
+                    ColorBlendAttrib.OIncomingAlpha,
+                    ColorBlendAttrib.OOne,
+                ),
+                1,
+            )
+            outline_stage = TextureStage(f"anomaly-outline-{idx}")
+            outline_stage.setMode(TextureStage.MModulate)
+
+            if kind == "blow":
+                core.setColor(0.0, 0.0, 0.0, 0.97)
+                lens.setColor(0.06, 0.08, 0.12, 0.26)
+                corona.setColor(0.18, 0.22, 0.36, 0.16)
+                outline.setTexture(outline_stage, self.black_hole_blow_dial_tex, 1)
+                dial_scale = max(0.9, self.black_hole_visual_radius * 2.25)
+                outline.setScale(dial_scale, dial_scale, max(0.06, dial_scale * 0.11))
             else:
-                pylon = self._add_box(Vec3(0, 0, 0.62), Vec3(0.32, 0.32, 0.62), color=(0.7, 0.78, 0.88, 1.0), parent=landmark_root, collidable=False)
-                orb = self.sphere_model.copyTo(landmark_root)
-                orb.setScale(0.34)
-                orb.setPos(0, 0, 1.4)
-                orb.setColor(0.26, 0.95, 1.0, 0.95)
-                orb.setTransparency(TransparencyAttrib.MAlpha)
-                orb.setLightOff(1)
-                self._register_color_cycle(orb, (0.26, 0.95, 1.0, 0.95), min_speed=0.08, max_speed=0.2)
-                if pylon is not None and not pylon.isEmpty():
-                    pylon.setCollideMask(BitMask32.allOff())
+                core.setColor(0.0, 0.0, 0.0, 0.98)
+                lens.setColor(0.04, 0.06, 0.09, 0.28)
+                corona.setColor(0.12, 0.16, 0.28, 0.15)
+                outline.setTexture(outline_stage, self.black_hole_suck_outline_tex, 1)
+            outline.setColor(1.0, 1.0, 1.0, 0.36)
 
-            w_coord = self._compute_level_w(center)
-            self._apply_hypercube_projection(landmark_root, w_coord, scale_hint=max(room.w, room.h) * 0.08)
-            self._register_scene_visual(landmark_root, w_coord)
-            self.room_landmarks.append({"room_idx": room_idx, "root": landmark_root})
+            self.black_holes.append(
+                {
+                    "root": root,
+                    "core": core,
+                    "lens": lens,
+                    "corona": corona,
+                    "outline": outline,
+                    "outline_stage": outline_stage,
+                    "kind": kind,
+                    "room_idx": room_idx,
+                    "base_z": base_z + 1.35,
+                    "phase": random.uniform(0.0, math.tau),
+                    "spin": random.uniform(30.0, 70.0) * (-1.0 if kind == "blow" else 1.0),
+                    "vel": Vec3(
+                        random.uniform(-self.black_hole_roam_speed, self.black_hole_roam_speed),
+                        random.uniform(-self.black_hole_roam_speed, self.black_hole_roam_speed),
+                        0.0,
+                    ),
+                    "pull": random.uniform(self.black_hole_pull_strength * 0.8, self.black_hole_pull_strength * 1.35),
+                    "radius": random.uniform(self.black_hole_influence_radius * 0.85, self.black_hole_influence_radius * 1.25),
+                    "distort_gain": random.uniform(0.55, 1.2),
+                    "loop_sfx": None,
+                }
+            )
+
+        self._attach_black_hole_loop_sounds()
+
+    def _update_roaming_black_holes(self, dt: float) -> None:
+        if not self.black_holes:
+            self.black_hole_distort_intensity = max(0.0, self.black_hole_distort_intensity - dt * 2.0)
+            return
+
+        ball_pos = self.ball_np.getPos() if hasattr(self, "ball_np") and self.ball_np is not None else None
+        listener_pos = Vec3(ball_pos) if ball_pos is not None else (self.camera.getPos(self.render) if hasattr(self, "camera") else Vec3(0, 0, 0))
+        listener_vel = self.ball_body.getLinearVelocity() if hasattr(self, "ball_body") and self.ball_body is not None else Vec3(0, 0, 0)
+        live_monsters: list[dict] = []
+        for monster in getattr(self, "monsters", []):
+            if monster.get("dead", False):
+                continue
+            root = monster.get("root")
+            if root is None or root.isEmpty():
+                continue
+            monster["cosmic_warp_cooldown"] = max(0.0, float(monster.get("cosmic_warp_cooldown", 0.0)) - dt)
+            live_monsters.append(monster)
+
+        max_distort = 0.0
+        monster_force_scale = max(0.001, float(getattr(self, "black_hole_monster_force_scale", 0.032)))
+        spit_speed = max(0.5, float(getattr(self, "black_hole_monster_spit_speed", 8.2)))
+        warp_cd = max(0.2, float(getattr(self, "black_hole_monster_warp_cooldown", 2.4)))
+
+        for entry in self.black_holes:
+            root = entry.get("root")
+            if root is None or root.isEmpty():
+                loop_sfx = entry.get("loop_sfx")
+                if loop_sfx:
+                    try:
+                        loop_sfx.stop()
+                    except Exception:
+                        pass
+                    entry["loop_sfx"] = None
+                continue
+
+            kind = str(entry.get("kind", "suck")).lower()
+            pos = root.getPos()
+            pos += Vec3(entry.get("vel", Vec3(0, 0, 0))) * dt
+
+            room_idx = int(entry.get("room_idx", 0))
+            room_idx = max(0, min(len(self.rooms) - 1, room_idx))
+            room = self.rooms[room_idx]
+            x_min = room.x + 1.0
+            x_max = room.x + room.w - 1.0
+            y_min = room.y + 1.0
+            y_max = room.y + room.h - 1.0
+
+            vel = Vec3(entry.get("vel", Vec3(0, 0, 0)))
+            if pos.x < x_min or pos.x > x_max:
+                vel.x = -vel.x
+            if pos.y < y_min or pos.y > y_max:
+                vel.y = -vel.y
+            pos.x = max(x_min, min(x_max, pos.x))
+            pos.y = max(y_min, min(y_max, pos.y))
+            entry["vel"] = vel
+
+            phase = float(entry.get("phase", 0.0))
+            pos.z = float(entry.get("base_z", pos.z)) + 0.42 * math.sin(self.roll_time * 1.8 + phase)
+            root.setPos(pos)
+            root.setHpr(self.roll_time * float(entry.get("spin", 42.0)), self.roll_time * 9.0, 0.0)
+
+            loop_sfx = entry.get("loop_sfx")
+            if loop_sfx:
+                to_listener = listener_pos - pos
+                dist = max(1e-5, to_listener.length())
+                dir_to_listener = to_listener / dist
+                anomaly_vel = Vec3(entry.get("vel", Vec3(0, 0, 0)))
+                rel_radial = (anomaly_vel - listener_vel).dot(dir_to_listener)
+                exaggeration = float(getattr(self, "black_hole_doppler_exaggeration", 13.5))
+                rate = 1.0 + (rel_radial * 0.016 * exaggeration)
+                if kind == "suck":
+                    rate *= 0.93 + 0.14 * (0.5 + 0.5 * math.sin(self.roll_time * 2.4 + phase))
+                else:
+                    rate *= 0.9 + 0.18 * (0.5 + 0.5 * math.sin(self.roll_time * 3.1 + phase))
+                loop_sfx.setPlayRate(self._clamp(rate, 0.35, 3.6))
+                max_dist = max(1.0, float(getattr(self, "black_hole_sfx_max_distance", 520.0)))
+                prox = self._clamp(1.0 - (dist / max_dist), 0.0, 1.0)
+                base_vol = float(getattr(self, "black_hole_sfx_volume", 0.9))
+                shaped = 0.2 + 0.8 * (prox ** 1.6)
+                loop_sfx.setVolume(self._clamp(base_vol * shaped, 0.0, 1.0))
+
+            lens = entry.get("lens")
+            corona = entry.get("corona")
+            outline = entry.get("outline")
+            pulse = 0.5 + 0.5 * math.sin(self.roll_time * 4.6 + phase)
+            if lens is not None and not lens.isEmpty():
+                lens.setTexOffset(TextureStage.getDefault(), (self.roll_time * 0.31 + phase * 0.11) % 1.0, (self.roll_time * -0.27 + phase * 0.17) % 1.0)
+                lens.setScale(max(0.2, self.black_hole_visual_radius * (0.94 + pulse * 0.28)))
+                if kind == "blow":
+                    lens.setColor(0.08 + pulse * 0.1, 0.12 + pulse * 0.1, 0.18 + pulse * 0.12, 0.1 + pulse * 0.14)
+                else:
+                    lens.setColor(0.06 + pulse * 0.08, 0.08 + pulse * 0.09, 0.12 + pulse * 0.1, 0.11 + pulse * 0.14)
+            if corona is not None and not corona.isEmpty():
+                corona.setTexOffset(TextureStage.getDefault(), (self.roll_time * -0.2 + phase * 0.27) % 1.0, (self.roll_time * 0.22 + phase * 0.09) % 1.0)
+                corona.setScale(max(0.3, self.black_hole_visual_radius * (1.15 + pulse * 0.42)))
+                if kind == "blow":
+                    corona.setColor(0.18 + pulse * 0.12, 0.26 + pulse * 0.12, 0.44 + pulse * 0.14, 0.08 + pulse * 0.1)
+                else:
+                    corona.setColor(0.14 + pulse * 0.1, 0.2 + pulse * 0.11, 0.34 + pulse * 0.12, 0.08 + pulse * 0.1)
+            if outline is not None and not outline.isEmpty():
+                glow = 0.68 + 0.32 * pulse
+                outline_stage = entry.get("outline_stage")
+                if kind == "blow":
+                    dial_scale = max(0.9, self.black_hole_visual_radius * (2.2 + pulse * 0.18))
+                    outline.setScale(dial_scale, dial_scale, max(0.06, dial_scale * 0.11))
+                    outline.setColor(0.95 * glow, 0.98 * glow, 1.0 * glow, 0.2 + pulse * 0.24)
+                    if outline_stage is not None:
+                        outline.setTexRotate(outline_stage, (self.roll_time * -72.0 + phase * 57.0) % 360.0)
+                        outline.setTexOffset(outline_stage, (phase * 0.13 + self.roll_time * 0.06) % 1.0, 0.0)
+                else:
+                    outline.setScale(max(0.4, self.black_hole_visual_radius * (1.86 + pulse * 0.3)))
+                    outline.setColor(1.0 * glow, 1.0 * glow, 1.0 * glow, 0.24 + pulse * 0.26)
+                    if outline_stage is not None:
+                        outline.setTexRotate(outline_stage, (self.roll_time * 108.0 + phase * 91.0) % 360.0)
+                        outline.setTexOffset(outline_stage, (phase * 0.07 + self.roll_time * 0.03) % 1.0, 0.0)
+
+            radius = max(0.8, float(entry.get("radius", self.black_hole_influence_radius)))
+            pull_strength = max(0.0, float(entry.get("pull", self.black_hole_pull_strength)))
+            distort_gain = max(0.0, float(entry.get("distort_gain", 1.0)))
+
+            if ball_pos is not None and hasattr(self, "ball_body") and self.ball_body is not None:
+                to_anomaly = pos - ball_pos
+                dist = max(1e-5, to_anomaly.length())
+                if dist <= radius:
+                    direction = to_anomaly / dist
+                    proximity = 1.0 - (dist / radius)
+                    force_dir = -direction if kind == "blow" else direction
+                    force_mag = pull_strength * (0.16 + proximity * proximity * (1.95 if kind == "blow" else 1.7))
+                    if kind == "suck":
+                        soften = self._clamp(float(getattr(self, "black_hole_suck_escape_soften", 0.38)), 0.1, 0.9)
+                        soften_dist = max(0.3, radius * soften)
+                        center_scale = self._clamp(dist / soften_dist, 0.0, 1.0)
+                        force_mag *= (0.22 + 0.78 * center_scale)
+                        force_mag = min(force_mag, float(getattr(self, "black_hole_suck_max_force", 165.0)))
+                    self.ball_body.applyCentralForce(force_dir * force_mag)
+                    max_distort = max(max_distort, proximity * distort_gain)
+
+            for monster in live_monsters:
+                m_root = monster.get("root")
+                if m_root is None or m_root.isEmpty():
+                    continue
+                m_pos = m_root.getPos()
+                to_anomaly_m = pos - m_pos
+                m_dist = max(1e-5, to_anomaly_m.length())
+                if m_dist > radius:
+                    continue
+
+                m_dir = to_anomaly_m / m_dist
+                proximity_m = 1.0 - (m_dist / radius)
+                move_dir = -m_dir if kind == "blow" else m_dir
+                shove = pull_strength * (0.14 + proximity_m * proximity_m * 1.65) * monster_force_scale
+                existing_knock = Vec3(monster.get("knockback_vel", Vec3(0, 0, 0)))
+                monster["knockback_vel"] = existing_knock + move_dir * shove
+
+                if kind == "suck" and proximity_m >= 0.94 and float(monster.get("cosmic_warp_cooldown", 0.0)) <= 0.0:
+                    target_room_idx = random.randrange(len(self.rooms))
+                    out_pos = self._safe_room_spawn_pos(target_room_idx, z_lift=random.uniform(0.32, 0.82))
+                    m_root.setPos(out_pos)
+                    monster["prev_pos"] = Vec3(out_pos)
+                    monster["base_z"] = float(out_pos.z)
+                    spit_dir = Vec3(random.uniform(-1.0, 1.0), random.uniform(-1.0, 1.0), random.uniform(0.12, 0.46))
+                    if spit_dir.lengthSquared() < 1e-8:
+                        spit_dir = Vec3(1.0, 0.0, 0.22)
+                    spit_dir.normalize()
+                    monster["knockback_vel"] = spit_dir * random.uniform(spit_speed * 0.7, spit_speed * 1.35)
+                    monster["w"] = random.uniform(-self.hyper_w_limit * 0.95, self.hyper_w_limit * 0.95)
+                    monster["w_vel"] = float(monster.get("w_vel", 0.0)) * 0.2 + random.uniform(-2.4, 2.4)
+                    monster["fold_jump_cooldown"] = max(float(monster.get("fold_jump_cooldown", 0.0)), 0.8)
+                    monster["cosmic_warp_cooldown"] = warp_cd
+                    self._set_monster_state(monster, "guarding")
+
+        response = min(1.0, dt * 7.5)
+        self.black_hole_distort_intensity += (max_distort - self.black_hole_distort_intensity) * response
 
     def _update_outside_islands(self, dt: float) -> None:
         if not self.outside_islands:
@@ -7183,38 +8977,133 @@ class SoulSymphony(ShowBase):
         return path
 
     def _rebuild_goal_path_string(self) -> None:
-        if self.goal_np is None or self.goal_np.isEmpty() or self.goal_chunk_key is None:
-            return
-
         if self.goal_path_np is not None and not self.goal_path_np.isEmpty():
             self.goal_path_np.removeNode()
             self.goal_path_np = None
 
-        start_key = self._chunk_key_from_pos(self.ball_np.getPos())
-        if start_key not in self.exterior_chunks:
-            self._generate_exterior_chunk(start_key)
-
-        key_path = self._find_chunk_path(start_key, self.goal_chunk_key)
-        points = [Vec3(self.ball_np.getPos())]
-        if key_path:
-            for key in key_path[1:-1]:
-                data = self.exterior_chunks.get(key)
-                if data is None:
-                    continue
-                points.append(Vec3(data.get("center", self._chunk_center(key))))
-        points.append(Vec3(self.goal_pos))
-
-        if len(points) < 2:
+        start_pos = Vec3(self.ball_np.getPos()) if hasattr(self, "ball_np") and self.ball_np is not None else None
+        if start_pos is None:
             return
 
-        hue = (self.roll_time * 0.27) % 1.0
-        r, g, b = colorsys.hsv_to_rgb(hue, 0.85, 1.0)
+        nearest_monster_pos: Vec3 | None = None
+        nearest_monster_dist = float("inf")
+        player_w = float(getattr(self, "player_w", 0.0))
+        for monster in getattr(self, "monsters", []):
+            if monster.get("dead", False):
+                continue
+            root = monster.get("root")
+            if root is None or root.isEmpty():
+                continue
+            m_pos = root.getPos()
+            m_w = float(monster.get("w", 0.0))
+            d = self._distance4d(start_pos, player_w, m_pos, m_w)
+            if d < nearest_monster_dist:
+                nearest_monster_dist = d
+                nearest_monster_pos = Vec3(m_pos)
+
+        points: list[Vec3] = []
+        if nearest_monster_pos is not None:
+            up = self._get_gravity_up()
+            if up.lengthSquared() < 1e-8:
+                up = Vec3(0, 0, 1)
+            else:
+                up.normalize()
+
+            start = Vec3(start_pos)
+            end = Vec3(nearest_monster_pos)
+            chord = end - start
+            chord_len = max(0.001, chord.length())
+            arch_height = self._clamp(chord_len * 0.16, 0.7, 5.0)
+            control = (start + end) * 0.5 + up * arch_height
+
+            points = [start]
+            samples = 16
+            for i in range(1, samples):
+                t = i / float(samples)
+                omt = 1.0 - t
+                p = (start * (omt * omt)) + (control * (2.0 * omt * t)) + (end * (t * t))
+                points.append(Vec3(p))
+            points.append(end)
+        else:
+            if self.goal_np is None or self.goal_np.isEmpty() or self.goal_chunk_key is None:
+                points = []
+
+        if not points and self.goal_np is not None and not self.goal_np.isEmpty() and self.goal_chunk_key is not None:
+            start_key = self._chunk_key_from_pos(self.ball_np.getPos())
+            if start_key not in self.exterior_chunks:
+                self._generate_exterior_chunk(start_key)
+
+            key_path = self._find_chunk_path(start_key, self.goal_chunk_key)
+            points = [Vec3(self.ball_np.getPos())]
+            if key_path:
+                for key in key_path[1:-1]:
+                    data = self.exterior_chunks.get(key)
+                    if data is None:
+                        continue
+                    points.append(Vec3(data.get("center", self._chunk_center(key))))
+            points.append(Vec3(self.goal_pos))
+
+        landmark_points: list[Vec3] = []
+        nearest_landmark_pos: Vec3 | None = None
+        nearest_landmark_dist_sq = float("inf")
+        for entry in getattr(self, "room_landmarks", []):
+            root = entry.get("root") if isinstance(entry, dict) else None
+            if root is None or root.isEmpty():
+                continue
+            lp = root.getPos(self.render)
+            d_sq = (lp - start_pos).lengthSquared()
+            if d_sq < nearest_landmark_dist_sq:
+                nearest_landmark_dist_sq = d_sq
+                nearest_landmark_pos = Vec3(lp)
+
+        if nearest_landmark_pos is not None:
+            up = self._get_gravity_up()
+            if up.lengthSquared() < 1e-8:
+                up = Vec3(0, 0, 1)
+            else:
+                up.normalize()
+            l_start = Vec3(start_pos)
+            l_end = Vec3(nearest_landmark_pos)
+            l_chord = l_end - l_start
+            l_len = max(0.001, l_chord.length())
+            l_arch_height = self._clamp(l_len * 0.2, 0.8, 6.0)
+            l_control = (l_start + l_end) * 0.5 + up * l_arch_height
+            landmark_points = [l_start]
+            l_samples = 22
+            for i in range(1, l_samples):
+                t = i / float(l_samples)
+                omt = 1.0 - t
+                p = (l_start * (omt * omt)) + (l_control * (2.0 * omt * t)) + (l_end * (t * t))
+                landmark_points.append(Vec3(p))
+            landmark_points.append(l_end)
+
+        if len(points) < 2 and len(landmark_points) < 2:
+            return
+
         segs = LineSegs("goal-path-string")
-        segs.setThickness(1.0)
-        segs.setColor(r, g, b, 0.95)
-        segs.moveTo(points[0])
-        for p in points[1:]:
-            segs.drawTo(p)
+        segs.setThickness(1.2)
+
+        if len(points) >= 2:
+            hue = (self.roll_time * 0.27) % 1.0
+            r, g, b = colorsys.hsv_to_rgb(hue, 0.85, 1.0)
+            segs.setColor(r, g, b, 0.95)
+            segs.moveTo(points[0])
+            for p in points[1:]:
+                segs.drawTo(p)
+
+        if len(landmark_points) >= 2:
+            dotted_count = len(landmark_points) - 1
+            for i in range(dotted_count):
+                if i % 2 == 1:
+                    continue
+                a = landmark_points[i]
+                b_pt = landmark_points[i + 1]
+                hue = (self.roll_time * 0.45 + (i / max(1.0, float(dotted_count)))) % 1.0
+                rr, rg, rb = colorsys.hsv_to_rgb(hue, 0.92, 1.0)
+                segs.setColor(rr, rg, rb, 0.95)
+                segs.moveTo(a)
+                segs.drawTo(b_pt)
+
         self.goal_path_np = self.render.attachNewNode(segs.create(True))
         self.goal_path_np.setLightOff(1)
         self.goal_path_np.setShaderOff(1)
@@ -7514,6 +9403,15 @@ class SoulSymphony(ShowBase):
                 attack_mult = 1.2
                 cycle_min, cycle_max = 1.5, 2.8
 
+            if random.random() < float(getattr(self, "monster_giant_spawn_ratio", 0.08)):
+                variant = "giant"
+                hp_mult = max(hp_mult, float(getattr(self, "monster_giant_hp_mult", 6.5)))
+                defense_mult = max(defense_mult, 2.4)
+                speed_mult = min(speed_mult, 0.62)
+                guard_mult = max(guard_mult, 0.9)
+                attack_mult = max(attack_mult, 1.5)
+                cycle_min, cycle_max = 0.45, 1.15
+
             part_count = random.randint(2, 4)
             parts: list[dict] = []
             for _ in range(part_count):
@@ -7572,7 +9470,27 @@ class SoulSymphony(ShowBase):
             speed_scale = random.uniform(0.66, 1.42)
             hp_scale = random.uniform(0.76, 1.78)
             defense = random.uniform(0.75, 1.45)
+            detect_range_mult = random.uniform(0.72, 1.6)
+            range_profile_roll = random.random()
+            if range_profile_roll < 0.24:
+                detect_range_mult *= random.uniform(0.62, 0.88)
+            elif range_profile_roll > 0.76:
+                detect_range_mult *= random.uniform(1.2, 1.65)
+            monster_crit_chance = random.uniform(0.04, 0.2)
+            if variant == "raider":
+                monster_crit_chance = random.uniform(0.18, 0.34)
+            elif variant in ("juggernaut", "vanguard"):
+                monster_crit_chance = random.uniform(0.06, 0.18)
+            elif variant == "giant":
+                monster_crit_chance = random.uniform(0.02, 0.08)
+            fast_speed_boost = 1.0
+            if random.random() < float(getattr(self, "monster_fast_ratio", 0.22)):
+                fast_speed_boost = random.uniform(
+                    float(getattr(self, "monster_fast_speed_min", 2.0)),
+                    float(getattr(self, "monster_fast_speed_max", 3.4)),
+                )
             speed_scale *= speed_mult
+            speed_scale *= fast_speed_boost
             hp_scale *= hp_mult
             defense *= defense_mult
             velocity *= speed_scale
@@ -7597,7 +9515,10 @@ class SoulSymphony(ShowBase):
             hp_fill.setDepthWrite(False)
 
             state_text = TextNode(f"monster-state-{idx}")
-            state_text.setText("ELITE" if variant != "normal" else "WANDER")
+            if variant == "giant":
+                state_text.setText("GIANT")
+            else:
+                state_text.setText("ELITE" if variant != "normal" else "WANDER")
             state_text.setTextColor(0.65, 0.8, 1.0, 0.85)
             state_text.setAlign(TextNode.ACenter)
             state_np = hp_anchor.attachNewNode(state_text)
@@ -7627,6 +9548,7 @@ class SoulSymphony(ShowBase):
                 "hum_active": False,
                 "variant": variant,
                 "defense": defense,
+                "critical_chance": monster_crit_chance,
                 "contact_damage": random.choice([8.0, 10.0, 12.0, 14.0]) * attack_mult,
                 "outline_radius": random.uniform(4.0, 7.4),
                 "outline_phase": random.uniform(0.0, math.tau),
@@ -7637,12 +9559,16 @@ class SoulSymphony(ShowBase):
                 "ai_state": "guarding" if variant in ("juggernaut", "vanguard") else "wandering",
                 "ai_char": None,
                 "ai_behaviors": None,
-                "ai_hunt_range": random.uniform(9.0, 14.5) * guard_mult,
+                "ai_hunt_range": random.uniform(9.0, 14.5) * guard_mult * detect_range_mult,
                 "ai_attack_range": random.uniform(1.5, 2.4) * max(1.0, speed_mult * 0.9),
-                "ai_guard_range": random.uniform(15.0, 20.0) * guard_mult,
+                "ai_guard_range": random.uniform(15.0, 20.0) * guard_mult * detect_range_mult,
+                "detection_range_mult": detect_range_mult,
+                "docile_until_attacked": variant == "giant",
+                "awakened": variant != "giant",
                 "fold_target_idx": None,
                 "fold_jump_cooldown": random.uniform(0.0, 0.55),
                 "liminal_phase": random.uniform(0.0, math.tau),
+                "speed_boost": fast_speed_boost,
             }
             self.monsters.append(monster)
             self._register_scene_visual(root, monster["w"])
@@ -7730,16 +9656,20 @@ class SoulSymphony(ShowBase):
 
             desired_state = monster.get("state", "wandering")
             if desired_state not in ("hit", "dying"):
-                if hp_ratio < 0.24 and dist_sq < (hunt_range * 1.6) ** 2:
-                    desired_state = "running"
-                elif dist_sq <= attack_range * attack_range:
-                    desired_state = "attacking"
-                elif dist_sq <= hunt_range * hunt_range:
-                    desired_state = "hunting"
-                elif dist_sq <= guard_range * guard_range:
-                    desired_state = "guarding"
-                else:
+                dormant_docile = bool(monster.get("docile_until_attacked", False)) and (not bool(monster.get("awakened", False)))
+                if dormant_docile:
                     desired_state = "wandering"
+                else:
+                    if hp_ratio < 0.24 and dist_sq < (hunt_range * 1.6) ** 2:
+                        desired_state = "running"
+                    elif dist_sq <= attack_range * attack_range:
+                        desired_state = "attacking"
+                    elif dist_sq <= hunt_range * hunt_range:
+                        desired_state = "hunting"
+                    elif dist_sq <= guard_range * guard_range:
+                        desired_state = "guarding"
+                    else:
+                        desired_state = "wandering"
                 self._set_monster_state(monster, desired_state)
 
             if Vec3(monster.get("knockback_vel", Vec3(0, 0, 0))).lengthSquared() < 0.03:
@@ -7814,6 +9744,18 @@ class SoulSymphony(ShowBase):
                         self._set_monster_state(monster, "guarding")
 
             pos, _ = self._wrap_xy_position(pos, margin=1.6)
+
+            speed_boost = max(1.0, float(monster.get("speed_boost", 1.0)))
+            if speed_boost > 1.01:
+                planar_delta = Vec3(pos.x - prev_pos.x, pos.y - prev_pos.y, 0.0)
+                if planar_delta.lengthSquared() > 1e-8:
+                    extra = planar_delta * (speed_boost - 1.0)
+                    max_extra = max(0.0, dt * (2.6 + 3.8 * speed_boost))
+                    extra_len = extra.length()
+                    if extra_len > max_extra and max_extra > 0.0:
+                        extra *= max_extra / extra_len
+                    pos += extra
+
             root.setPos(pos)
 
             vel = (pos - prev_pos) / max(1e-4, dt)
@@ -8201,7 +10143,14 @@ class SoulSymphony(ShowBase):
         self._build_floor_and_bounds()
 
         hub_half = Vec3(4.6, 4.6, 0.55)
-        self._add_box(center + Vec3(0, 0, 2.6), hub_half, color=(0.28, 0.46, 0.68, 1.0), motion_group="platform", w_coord=0.0)
+        self._add_box(
+            center + Vec3(0, 0, 2.6),
+            hub_half,
+            color=(0.28, 0.46, 0.68, 1.0),
+            motion_group="platform",
+            w_coord=0.0,
+            surface_mode="floor",
+        )
         self.arena_platform_points.append(Vec3(center.x, center.y, center.z + 3.5))
 
         ring_count = 4 if self.performance_mode else 5
@@ -8240,6 +10189,7 @@ class SoulSymphony(ShowBase):
                     color=color,
                     motion_group=("platform" if moving else None),
                     w_coord=w_coord,
+                    surface_mode="floor",
                 )
                 self.arena_platform_points.append(Vec3(x, y, z + hz + 0.35))
 
@@ -8250,6 +10200,7 @@ class SoulSymphony(ShowBase):
                         Vec3(0.22, 0.22, pillar_h * 0.5),
                         color=(0.22, 0.66, 0.92, 1.0),
                         w_coord=w_coord,
+                        surface_mode="floor",
                     )
 
         self.liminal_fold_nodes.clear()
@@ -9776,6 +11727,7 @@ class SoulSymphony(ShowBase):
             self._update_vertical_movers(self.vertical_mover_update_interval)
             self.vertical_mover_update_timer = self.vertical_mover_update_interval
         self._update_outside_islands(dt)
+        self._update_roaming_black_holes(dt)
         self._update_warp_links(dt)
         self._update_phase_room_overlays(dt)
         self.color_cycle_update_timer -= dt
@@ -9809,8 +11761,12 @@ class SoulSymphony(ShowBase):
             self._update_player_health_ui()
             self._update_monster_hud_ui()
             self.health_ui_update_timer = 1.0 / 20.0
+        self._update_input_hud(dt)
+        self._update_holographic_map_ui(dt)
 
         if self.game_over_active or self.win_active:
+            if self.game_over_active:
+                self._update_game_over_countdown(dt)
             if hasattr(self, "ball_body") and self.ball_body is not None:
                 self.ball_body.setLinearVelocity(Vec3(0, 0, 0))
                 self.ball_body.setAngularVelocity(Vec3(0, 0, 0))
@@ -9822,6 +11778,8 @@ class SoulSymphony(ShowBase):
         self._update_sword_powerups(dt)
         self._update_floating_texts(dt)
         self._update_hyperbomb(dt)
+        self._update_magic_missiles(dt)
+        self._update_magic_missile_trails(dt)
         if self.enable_particles and self.enable_motion_trails:
             self._update_motion_trails(dt)
         elif self.motion_trails:
@@ -10217,6 +12175,7 @@ class SoulSymphony(ShowBase):
         self._update_floor_contact_pulses(dt, grounded_contact if self.grounded else None)
 
         self._update_floor_wet_shader_inputs(dt, grounded_contact if self.grounded else None, speed)
+        self._update_water_surface_shader_inputs()
 
         self._update_ripple_transparency(dt, grounded_contact if self.grounded else None)
 
