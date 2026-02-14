@@ -271,6 +271,7 @@ def apply_attack_hits(game, is_spin: bool) -> None:
         return
 
     ball_pos = game.ball_np.getPos()
+    player_w = float(getattr(game, "player_w", 0.0))
     swing_forward = game.sword_pivot.getQuat(game.render).getForward()
     swing_forward = Vec3(swing_forward.x, swing_forward.y, 0)
     if swing_forward.lengthSquared() > 1e-6:
@@ -289,11 +290,15 @@ def apply_attack_hits(game, is_spin: bool) -> None:
             continue
 
         to_monster = root.getPos() - ball_pos
+        monster_w = float(monster.get("w", 0.0))
         planar = Vec3(to_monster.x, to_monster.y, 0)
         planar_dist = planar.length()
+        w_scale = max(0.1, float(getattr(game, "w_dimension_distance_scale", 4.0)))
+        dw_scaled = (monster_w - player_w) * w_scale
+        dist4d = math.sqrt(max(0.0, planar_dist * planar_dist + dw_scaled * dw_scaled))
         reach_mult = max(0.6, float(getattr(game, "sword_reach_multiplier", 1.0)))
         max_reach = game.sword_reach * reach_mult + monster["radius"] * 0.65
-        if planar_dist > max_reach:
+        if dist4d > max_reach:
             continue
 
         if not is_spin:

@@ -2,7 +2,11 @@ import math
 import os
 import random
 import colorsys
-import ctypes
+import sys
+try:
+    import ctypes
+except Exception:
+    ctypes = None
 import importlib.util
 import time
 import heapq
@@ -22,7 +26,12 @@ try:
 except Exception:
     AICharacter = None
     AIWorld = None
-from panda3d.bullet import BulletBoxShape, BulletRigidBodyNode, BulletWorld
+try:
+    from panda3d.bullet import BulletBoxShape, BulletRigidBodyNode, BulletWorld
+except Exception:
+    BulletBoxShape = None
+    BulletRigidBodyNode = None
+    BulletWorld = None
 from panda3d.core import AmbientLight, BitMask32, CardMaker, ColorBlendAttrib, CullFaceAttrib, DirectionalLight, Fog, LightRampAttrib, LineSegs, Material, NodePath, PNMImage, Point2, PointLight, Shader, TexGenAttrib, TextNode, Texture, TextureStage, TransparencyAttrib, Vec2, Vec3, WindowProperties, loadPrcFileData
 
 from camera import camera_orbit_position, resolve_camera_collision, rotate_around_axis, setup_camera
@@ -36,6 +45,8 @@ from world import create_checker_texture, create_shadow_texture
 
 
 def _detect_native_resolution() -> tuple[int, int]:
+    if ctypes is None:
+        return 1920, 1080
     try:
         user32 = ctypes.windll.user32
         try:
@@ -90,6 +101,13 @@ def _env_flag(name: str, default: bool) -> bool:
 
 
 def _configure_gpu_prc() -> None:
+    if sys.platform == "emscripten":
+        os.environ["SOULSYM_CUDA_ACTIVE"] = "0"
+        os.environ["SOULSYM_CUDA_SOURCE"] = "none"
+        os.environ["SOULSYM_MULTI_GPU_ACTIVE"] = "0"
+        print("[GPU] Web runtime detected; CUDA/torch checks skipped.")
+        return
+
     safe_render = _env_flag("SOULSYM_SAFE_RENDER", True)
     loadPrcFileData("", "load-display pandagl")
     if safe_render:
@@ -163,6 +181,8 @@ def _configure_gpu_prc() -> None:
 
 class SoulSymphony(ShowBase):
     def __init__(self):
+        if sys.platform == "emscripten" and BulletWorld is None:
+            raise RuntimeError("Web build is missing panda3d.bullet in this toolchain. Rebuild Panda WebGL with Bullet static libs or run desktop build.")
         super().__init__()
 
         self.disableMouse()
@@ -219,6 +239,11 @@ class SoulSymphony(ShowBase):
         self.enable_dynamic_shadows = (not self.performance_mode) and (not self.safe_render_mode)
         self.enable_ball_shadow = not self.performance_mode
         self.enable_occlusion_outlines = (not self.performance_mode) and (not self.safe_render_mode)
+        self.performance_player_light_enabled = True
+        self.performance_player_light_cycle_speed = 2.6
+        self.performance_player_light_saturation = 0.9
+        self.performance_player_light_value = 1.0
+        self.performance_player_light_height = 1.25
         self.physics_substeps = 2 if self.performance_mode else 4
         self.physics_fixed_timestep = (1 / 120.0) if self.performance_mode else (1 / 180.0)
         self.video_distort_strength = 0.24
@@ -317,6 +342,8 @@ class SoulSymphony(ShowBase):
         self.water_color_cycle_value = 1.0
         self.water_color_cycle_alpha = 0.34
         self.water_color_cycle_smoothness = 0.24
+        self.water_emissive_linux_enabled = sys.platform.startswith("linux") and _env_flag("SOULSYM_WATER_EMISSIVE_LINUX", False)
+        self.water_emissive_linux_scale = 1.35
         self.water_buoyancy_bias = 0.62
         self.water_buoyancy_strength = 2.2
         self.water_drag_planar = 0.85
@@ -552,6 +579,11 @@ class SoulSymphony(ShowBase):
         self.player_ai_move_smooth = 7.8
         self.player_ai_target_hysteresis = 1.18
         self.player_ai_last_move_dir = Vec3(0, 1, 0)
+        self.player_ai_jump_target_up_threshold = 0.55
+        self.player_ai_jump_nav_up_threshold = 0.35
+        self.player_ai_jump_probe_distance = 1.8
+        self.player_ai_bomb_range_mul = 1.9
+        self.player_ai_bomb_desire = 0.42
         self.w_dimension_distance_scale = 4.0
         self.subtractive_drill_max_radius = 4
 
@@ -702,6 +734,10 @@ class SoulSymphony(ShowBase):
         self.gravity_particles_update_interval = 1.0 / 30.0 if self.performance_mode else 1.0 / 45.0
         self.monster_collision_update_timer = 0.0
         self.monster_collision_update_interval = 1.0 / 24.0 if self.performance_mode else 1.0 / 48.0
+        self.monster_ai_jump_enabled = True
+        self.monster_ai_jump_impulse = 4.8
+        self.monster_ai_jump_gravity = 12.0
+        self.monster_ai_jump_cooldown_duration = 0.9
 
         self.level_texgen_mode = None
         self.ball_texgen_mode = None
@@ -734,10 +770,17 @@ class SoulSymphony(ShowBase):
         self.sword_reach_multiplier = 1.0
         self.combat_damage_multiplier = 1.0
         self.damage_taken_multiplier = 1.0
+        self.critical_hit_base_chance = 0.08
+        self.critical_hit_multiplier = 2.1
+        self.critical_knockback_multiplier = 2.75
+        self.critical_chance_bonus_permanent = 0.0
+        self.critical_chance_bonus_temp_bonus = 0.14
+        self.critical_hit_chance_current = self.critical_hit_base_chance
         self.skill_buffs = {
             "haste": 0.0,
             "longblade": 0.0,
             "fury": 0.0,
+            "critical": 0.0,
         }
         self.sword_pickup_serial = 0
         self.sword_powerups: list[dict] = []
@@ -770,11 +813,11 @@ class SoulSymphony(ShowBase):
         self.hyperbomb_scale_start = 0.045
         self.hyperbomb_growth_speed = 18.5
         self.hyperbomb_growth_slowdown = 4.2
-        self.hyperbomb_max_scale_factor = 4.0
+        self.hyperbomb_max_scale_factor = 5.2
         self.hyperbomb_max_scale = 64.0
-        self.hyperbomb_damage_radius_factor = 1.05
-        self.hyperbomb_damage_interval = 0.12
-        self.hyperbomb_damage_per_tick = 22.0
+        self.hyperbomb_damage_radius_factor = 1.4
+        self.hyperbomb_damage_interval = 0.08
+        self.hyperbomb_damage_per_tick = 36.0
         self.hyperbomb_damage_timer = 0.0
         self.hyperbomb_alpha_log_k = 9.0
         self.hyperbomb_alpha_min = 0.12
@@ -817,7 +860,7 @@ class SoulSymphony(ShowBase):
         self._setup_kill_protection_system()
         self._initialize_infinite_world_goal()
         self._setup_weapon()
-        self._spawn_hypercube_monsters(count=16 if self.performance_mode else 22)
+        self._spawn_hypercube_monsters(count=64)
         self._setup_monster_ai_system()
         self._setup_ball_outline()
         if self.enable_ball_shadow:
@@ -937,6 +980,15 @@ class SoulSymphony(ShowBase):
             "soundfx/monsterdie",
             "sfx/monsterdie",
         ])
+        self.sfx_critical_damage_bank = self._load_critical_damage_sfx_bank()
+        self.sfx_critical_damage_last = None
+        self.sfx_kill_bank = self._load_kill_sfx_bank()
+        self.sfx_kill_last = None
+        self.sfx_game_over_bank = self._load_game_over_sfx_bank()
+        self.sfx_game_over_last = None
+        self.sfx_win_bank = self._load_win_sfx_bank()
+        self.sfx_win_last = None
+        self.voiceover_volume_scale = 0.5
         self.sfx_attackbomb_path = self._resolve_attackbomb_path()
         self.sfx_monster_hum_path = self._resolve_monster_hum_path()
         self.sfx_monster_hum_is_idle = bool(
@@ -946,7 +998,7 @@ class SoulSymphony(ShowBase):
         self.hit_cooldown = 0.0
         self.bgm_track = None
         self.bgm_track_path = None
-        self.bgm_volume = 0.03
+        self.bgm_volume = 0.3
 
         if self.sfx_roll:
             self.audio3d.attachSoundToObject(self.sfx_roll, self.ball_np)
@@ -1020,6 +1072,39 @@ class SoulSymphony(ShowBase):
         self.lower_lamp_np = self.render.attachNewNode(self.lower_lamp)
         self.lower_lamp_np.setPos(cx, cy, -0.8)
         self.render.setLight(self.lower_lamp_np)
+
+        self._ensure_performance_player_light()
+
+    def _remove_performance_player_light(self) -> None:
+        perf_np = getattr(self, "performance_player_light_np", None)
+        if perf_np is not None and not perf_np.isEmpty():
+            try:
+                self.render.clearLight(perf_np)
+            except Exception:
+                pass
+            perf_np.removeNode()
+        self.performance_player_light = None
+        self.performance_player_light_np = None
+
+    def _ensure_performance_player_light(self) -> None:
+        should_enable = bool(getattr(self, "performance_mode", False)) and bool(getattr(self, "performance_player_light_enabled", True))
+        if not should_enable:
+            self._remove_performance_player_light()
+            return
+
+        perf_np = getattr(self, "performance_player_light_np", None)
+        if perf_np is not None and not perf_np.isEmpty():
+            return
+
+        perf_light = PointLight("perf-player-light")
+        perf_light.setColor((0.95, 0.7, 1.0, 1.0))
+        perf_light.setAttenuation((1.0, 0.06, 0.008))
+        perf_np = self.render.attachNewNode(perf_light)
+        if hasattr(self, "ball_np") and self.ball_np is not None and not self.ball_np.isEmpty():
+            perf_np.setPos(self.ball_np.getPos(self.render))
+        self.render.setLight(perf_np)
+        self.performance_player_light = perf_light
+        self.performance_player_light_np = perf_np
 
     def _print_scene_graph_resources(self) -> None:
         verbose_stats = _env_flag("SOULSYM_VERBOSE_SCENE_STATS", False)
@@ -1415,6 +1500,20 @@ class SoulSymphony(ShowBase):
             self.lower_lamp.setColor((depth, depth * 1.15, depth * 2.1, 1.0))
             if hasattr(self, "fog") and self.fog is not None:
                 self.fog.setColor(depth * 0.8, depth * 1.0, depth * 1.7)
+
+        if bool(getattr(self, "performance_mode", False)) and bool(getattr(self, "performance_player_light_enabled", True)):
+            self._ensure_performance_player_light()
+            perf_light = getattr(self, "performance_player_light", None)
+            perf_np = getattr(self, "performance_player_light_np", None)
+            if perf_light is not None and perf_np is not None and not perf_np.isEmpty() and hasattr(self, "ball_np"):
+                perf_np.setPos(self.ball_np.getPos(self.render))
+                hue = (t * float(getattr(self, "performance_player_light_cycle_speed", 2.6))) % 1.0
+                sat = self._clamp(float(getattr(self, "performance_player_light_saturation", 0.9)), 0.0, 1.0)
+                val = self._clamp(float(getattr(self, "performance_player_light_value", 1.0)), 0.0, 1.0)
+                lr, lg, lb = colorsys.hsv_to_rgb(hue, sat, val)
+                perf_light.setColor((lr, lg, lb, 1.0))
+        else:
+            self._remove_performance_player_light()
 
     def _update_hyperspace_background(self, t: float, hyperspace_amount: float) -> None:
         amount = max(0.0, min(1.0, hyperspace_amount))
@@ -2211,8 +2310,12 @@ class SoulSymphony(ShowBase):
             if len(path) >= 2:
                 nav_target = self._room_center_pos(path[1])
 
-        move_vec = nav_target - ball_pos
+        nav_delta = nav_target - ball_pos
+        target_delta = target_pos - ball_pos
+        move_vec = Vec3(nav_delta)
         gravity_up = self._get_gravity_up()
+        target_up_delta = float(target_delta.dot(gravity_up))
+        nav_up_delta = float(nav_delta.dot(gravity_up))
         move_vec = move_vec - gravity_up * move_vec.dot(gravity_up)
         if move_vec.lengthSquared() <= 1e-6:
             return None
@@ -2236,10 +2339,13 @@ class SoulSymphony(ShowBase):
             self.player_ai_lock_target_id = None
 
         if self.grounded and self.player_ai_jump_cooldown <= 0.0:
-            need_jump = (target_pos.z - ball_pos.z) > max(0.55, self.ball_radius * 0.8)
+            target_up_threshold = max(float(getattr(self, "player_ai_jump_target_up_threshold", 0.55)), self.ball_radius * 0.8)
+            nav_up_threshold = max(float(getattr(self, "player_ai_jump_nav_up_threshold", 0.35)), self.ball_radius * 0.45)
+            need_jump = target_up_delta > target_up_threshold or nav_up_delta > nav_up_threshold
             if not need_jump:
-                ray_from = ball_pos + gravity_up * (self.ball_radius * 0.1)
-                ray_to = ray_from + move_vec * 1.5
+                ray_from = ball_pos + gravity_up * (self.ball_radius * 0.16)
+                probe_dist = max(1.2, float(getattr(self, "player_ai_jump_probe_distance", 1.8)))
+                ray_to = ray_from + move_vec * probe_dist
                 try:
                     hit = self.physics_world.rayTestClosest(ray_from, ray_to)
                     if hit.hasHit() and hit.getNode() is not None and hit.getNode() != self.ball_body:
@@ -2251,10 +2357,23 @@ class SoulSymphony(ShowBase):
                 self.player_ai_jump_cooldown = random.uniform(0.32, 0.55)
 
         if self.attack_mode == "idle" and self.attack_cooldown <= 0.0:
-            if target_dist_4d <= self.sword_reach * 0.88:
+            bomb_range = max(self.sword_reach * 0.9, self.sword_reach * float(getattr(self, "player_ai_bomb_range_mul", 1.9)))
+            bomb_desire = self._clamp(float(getattr(self, "player_ai_bomb_desire", 0.42)), 0.0, 1.0)
+            should_bomb = (
+                target_dist_4d <= bomb_range
+                and self.hyperbomb_cooldown <= 0.0
+                and (self.player_ai_combo_step % 3 == 1 or random.random() < bomb_desire)
+            )
+            if should_bomb:
+                self._trigger_hyperbomb()
+                self.player_ai_combo_step = (self.player_ai_combo_step + 1) % 6
+                self.player_ai_combo_timer = random.uniform(0.2, 0.4)
+            elif target_dist_4d <= self.sword_reach * 0.95:
                 if self.player_ai_combo_timer <= 0.0:
-                    self.player_ai_combo_step = (self.player_ai_combo_step + 1) % 4
-                if self.player_ai_combo_step in (0, 3) and target_dist_4d > self.sword_reach * 0.45:
+                    self.player_ai_combo_step = (self.player_ai_combo_step + 1) % 6
+                close_quarters = target_dist_4d <= self.sword_reach * 0.62
+                favor_spin = close_quarters or self.player_ai_combo_step in (0, 2, 4)
+                if favor_spin:
                     self._trigger_spin_attack()
                 else:
                     self._trigger_swing_attack()
@@ -2416,6 +2535,180 @@ class SoulSymphony(ShowBase):
                 if sfx:
                     return sfx
         return None
+
+    def _load_game_over_sfx_bank(self) -> list:
+        bank: list = []
+        folder = os.path.join("soundfx", "gameover_")
+        if not os.path.isdir(folder):
+            return bank
+
+        try:
+            names = sorted(os.listdir(folder))
+        except Exception:
+            return bank
+
+        for name in names:
+            if not name.lower().endswith(".wav"):
+                continue
+            path = os.path.join(folder, name).replace("\\", "/")
+            if not os.path.exists(path):
+                continue
+            try:
+                sfx = self.loader.loadSfx(path)
+            except Exception:
+                sfx = None
+            if sfx:
+                bank.append(sfx)
+        return bank
+
+    def _play_game_over_sfx(self) -> None:
+        bank = getattr(self, "sfx_game_over_bank", None)
+        if not bank:
+            return
+        candidates = bank
+        last_clip = getattr(self, "sfx_game_over_last", None)
+        if last_clip is not None and len(bank) > 1:
+            filtered = [clip for clip in bank if clip is not last_clip]
+            if filtered:
+                candidates = filtered
+        try:
+            clip = random.choice(candidates)
+        except Exception:
+            return
+        self.sfx_game_over_last = clip
+        vol = 0.9 * float(getattr(self, "voiceover_volume_scale", 1.0))
+        self._play_sound(clip, volume=vol, play_rate=1.0)
+
+    def _load_win_sfx_bank(self) -> list:
+        bank: list = []
+        folder = os.path.join("soundfx", "win_")
+        if not os.path.isdir(folder):
+            return bank
+
+        try:
+            names = sorted(os.listdir(folder))
+        except Exception:
+            return bank
+
+        for name in names:
+            if not name.lower().endswith(".wav"):
+                continue
+            path = os.path.join(folder, name).replace("\\", "/")
+            if not os.path.exists(path):
+                continue
+            try:
+                sfx = self.loader.loadSfx(path)
+            except Exception:
+                sfx = None
+            if sfx:
+                bank.append(sfx)
+        return bank
+
+    def _play_win_sfx(self) -> None:
+        bank = getattr(self, "sfx_win_bank", None)
+        if not bank:
+            return
+        candidates = bank
+        last_clip = getattr(self, "sfx_win_last", None)
+        if last_clip is not None and len(bank) > 1:
+            filtered = [clip for clip in bank if clip is not last_clip]
+            if filtered:
+                candidates = filtered
+        try:
+            clip = random.choice(candidates)
+        except Exception:
+            return
+        self.sfx_win_last = clip
+        vol = 0.92 * float(getattr(self, "voiceover_volume_scale", 1.0))
+        self._play_sound(clip, volume=vol, play_rate=1.0)
+
+    def _load_kill_sfx_bank(self) -> list:
+        bank: list = []
+        folder = os.path.join("soundfx", "kill_")
+        if not os.path.isdir(folder):
+            return bank
+
+        try:
+            names = sorted(os.listdir(folder))
+        except Exception:
+            return bank
+
+        for name in names:
+            if not name.lower().endswith(".wav"):
+                continue
+            path = os.path.join(folder, name).replace("\\", "/")
+            if not os.path.exists(path):
+                continue
+            try:
+                sfx = self.loader.loadSfx(path)
+            except Exception:
+                sfx = None
+            if sfx:
+                bank.append(sfx)
+        return bank
+
+    def _play_kill_sfx(self) -> bool:
+        bank = getattr(self, "sfx_kill_bank", None)
+        if not bank:
+            return False
+        candidates = bank
+        last_clip = getattr(self, "sfx_kill_last", None)
+        if last_clip is not None and len(bank) > 1:
+            filtered = [clip for clip in bank if clip is not last_clip]
+            if filtered:
+                candidates = filtered
+        try:
+            clip = random.choice(candidates)
+        except Exception:
+            return False
+        self.sfx_kill_last = clip
+        vol = 0.9 * float(getattr(self, "voiceover_volume_scale", 1.0))
+        self._play_sound(clip, volume=vol, play_rate=1.0)
+        return True
+
+    def _load_critical_damage_sfx_bank(self) -> list:
+        bank: list = []
+        folder = os.path.join("soundfx", "critical_damage_")
+        if not os.path.isdir(folder):
+            return bank
+
+        try:
+            names = sorted(os.listdir(folder))
+        except Exception:
+            return bank
+
+        for name in names:
+            if not name.lower().endswith(".wav"):
+                continue
+            path = os.path.join(folder, name).replace("\\", "/")
+            if not os.path.exists(path):
+                continue
+            try:
+                sfx = self.loader.loadSfx(path)
+            except Exception:
+                sfx = None
+            if sfx:
+                bank.append(sfx)
+        return bank
+
+    def _play_critical_damage_sfx(self) -> bool:
+        bank = getattr(self, "sfx_critical_damage_bank", None)
+        if not bank:
+            return False
+        candidates = bank
+        last_clip = getattr(self, "sfx_critical_damage_last", None)
+        if last_clip is not None and len(bank) > 1:
+            filtered = [clip for clip in bank if clip is not last_clip]
+            if filtered:
+                candidates = filtered
+        try:
+            clip = random.choice(candidates)
+        except Exception:
+            return False
+        self.sfx_critical_damage_last = clip
+        vol = 0.95 * float(getattr(self, "voiceover_volume_scale", 1.0))
+        self._play_sound(clip, volume=vol, play_rate=1.0 + random.uniform(-0.02, 0.02))
+        return True
 
     def _collect_bgm_tracks(self) -> list[str]:
         bgm_dir = "bgm"
@@ -3326,6 +3619,16 @@ class SoulSymphony(ShowBase):
                 node.setTransparency(TransparencyAttrib.MAlpha)
                 node.setDepthWrite(False)
                 node.setBin("transparent", 33)
+                if bool(getattr(self, "water_emissive_linux_enabled", False)):
+                    emissive_scale = max(1.0, float(getattr(self, "water_emissive_linux_scale", 1.35)))
+                    node.setLightOff(1)
+                    node.setColorScale(emissive_scale, emissive_scale, emissive_scale, 1.0)
+                else:
+                    try:
+                        node.clearLight()
+                    except Exception:
+                        pass
+                    node.setColorScale(1.0, 1.0, 1.0, 1.0)
             else:
                 node.setColor(0.9, 0.96, 1.0, 1.0)
             if self.floor_wet_shader is not None and mode == "floor":
@@ -3809,7 +4112,7 @@ class SoulSymphony(ShowBase):
             root.setAlphaScale(alpha)
 
             if do_damage:
-                dmg_mul = self._clamp(1.0 - (r ** 1.35), 0.15, 1.0)
+                dmg_mul = self._clamp(1.0 - (r ** 1.1), 0.25, 1.0)
                 self._damage_monster(monster, damage * dmg_mul)
 
     def _spawn_water_crystal(self) -> None:
@@ -4345,6 +4648,7 @@ class SoulSymphony(ShowBase):
             self.ball_body.setAngularVelocity(Vec3(0, 0, 0))
         if self.game_over_ui is not None and not self.game_over_ui.isEmpty():
             self.game_over_ui.show()
+        self._play_game_over_sfx()
 
     def _trigger_win(self) -> None:
         if self.win_active:
@@ -4357,6 +4661,7 @@ class SoulSymphony(ShowBase):
             self.ball_body.setAngularVelocity(Vec3(0, 0, 0))
         if self.win_ui is not None and not self.win_ui.isEmpty():
             self.win_ui.show()
+        self._play_win_sfx()
 
     def _restart_after_game_over(self) -> None:
         if not getattr(self, "game_over_active", False) and not getattr(self, "win_active", False):
@@ -4398,7 +4703,7 @@ class SoulSymphony(ShowBase):
             if hum:
                 hum.stop()
         self.monsters = []
-        self._spawn_hypercube_monsters(count=16 if self.performance_mode else 22)
+        self._spawn_hypercube_monsters(count=64)
         self._attach_monster_hum_sounds()
         self._setup_monster_ai_system()
 
@@ -4485,21 +4790,38 @@ class SoulSymphony(ShowBase):
             keep.append(ring_entry)
         self.kill_protection_rings = keep
 
-    def _apply_player_damage(self, amount: float) -> None:
+    def _apply_player_damage(self, amount: float) -> bool:
         if self.game_over_active:
-            return
+            return False
         dmg = max(0.0, float(amount))
         if dmg <= 0.0:
-            return
+            return False
         if self._consume_kill_protection():
-            return
+            return False
+
+        crit_chance = self._clamp(float(getattr(self, "critical_hit_chance_current", 0.08)), 0.0, 0.95)
+        is_critical = random.random() < crit_chance
+        if is_critical:
+            dmg *= max(1.2, float(getattr(self, "critical_hit_multiplier", 2.1)))
+
         dmg *= max(0.2, float(getattr(self, "damage_taken_multiplier", 1.0)))
         self.player_hp = max(0.0, self.player_hp - dmg)
         self._update_player_health_ui()
         if hasattr(self, "ball_np"):
-            self._spawn_floating_text(self.ball_np.getPos() + Vec3(0, 0, 0.62), f"HP -{int(round(dmg))}", (1.0, 0.25, 0.25, 1.0), scale=0.28, life=0.85)
+            if is_critical:
+                self._spawn_floating_text(
+                    self.ball_np.getPos() + Vec3(0, 0, 0.72),
+                    f"CRITICAL -{int(round(dmg))}",
+                    (1.0, 0.14, 0.14, 1.0),
+                    scale=0.34,
+                    life=1.0,
+                )
+                self._play_critical_damage_sfx()
+            else:
+                self._spawn_floating_text(self.ball_np.getPos() + Vec3(0, 0, 0.62), f"HP -{int(round(dmg))}", (1.0, 0.25, 0.25, 1.0), scale=0.28, life=0.85)
         if self.player_hp <= 0.0:
             self._trigger_game_over()
+        return is_critical
 
     def _update_combat_stat_buffs(self, dt: float) -> None:
         buffs = getattr(self, "skill_buffs", None)
@@ -4514,6 +4836,7 @@ class SoulSymphony(ShowBase):
         haste_active = float(getattr(self, "skill_buffs", {}).get("haste", 0.0)) > 0.0
         longblade_active = float(getattr(self, "skill_buffs", {}).get("longblade", 0.0)) > 0.0
         fury_active = float(getattr(self, "skill_buffs", {}).get("fury", 0.0)) > 0.0
+        critical_active = float(getattr(self, "skill_buffs", {}).get("critical", 0.0)) > 0.0
 
         dex_factor = 1.0 - min(0.38, dex * 0.018)
         haste_factor = 0.65 if haste_active else 1.0
@@ -4527,6 +4850,11 @@ class SoulSymphony(ShowBase):
 
         defense_factor = 1.0 - min(0.58, defense * 0.032)
         self.damage_taken_multiplier = max(0.3, defense_factor)
+
+        base_crit = max(0.0, float(getattr(self, "critical_hit_base_chance", 0.08)))
+        perm_crit = max(0.0, float(getattr(self, "critical_chance_bonus_permanent", 0.0)))
+        temp_crit = float(getattr(self, "critical_chance_bonus_temp_bonus", 0.14)) if critical_active else 0.0
+        self.critical_hit_chance_current = self._clamp(base_crit + perm_crit + temp_crit, 0.0, 0.9)
 
     def _apply_sword_pickup_effect(self, item: dict, ball_pos: Vec3) -> None:
         pickup_type = str(item.get("type", "sword")).lower()
@@ -4573,6 +4901,20 @@ class SoulSymphony(ShowBase):
             self.skill_buffs["fury"] = max(self.skill_buffs["fury"], duration)
             text = f"SKILL: FURY {duration:.0f}s"
             color = (1.0, 0.4, 0.66, 1.0)
+        elif pickup_type == "crit_core":
+            add = 0.022 + min(0.02, self.player_int_stat * 0.001)
+            self.critical_chance_bonus_permanent = self._clamp(
+                float(getattr(self, "critical_chance_bonus_permanent", 0.0)) + add,
+                0.0,
+                0.5,
+            )
+            text = f"CRIT CHANCE +{add * 100.0:.1f}%"
+            color = (1.0, 0.5, 0.22, 1.0)
+        elif pickup_type == "skill_critical":
+            duration = 9.0 + min(9.0, self.player_int_stat * 0.5)
+            self.skill_buffs["critical"] = max(self.skill_buffs["critical"], duration)
+            text = f"SKILL: CRITICAL {duration:.0f}s"
+            color = (1.0, 0.28, 0.2, 1.0)
         else:
             self.sword_upgrade_level += 1
             bonus = float(self.sword_damage_per_pickup)
@@ -4708,6 +5050,8 @@ class SoulSymphony(ShowBase):
             ("skill_haste", 0.56, (1.0, 0.84, 0.26, 0.98), (1.0, 0.78, 0.24, 0.34)),
             ("skill_longblade", 0.52, (0.32, 0.96, 1.0, 0.98), (0.24, 0.82, 1.0, 0.34)),
             ("skill_fury", 0.48, (1.0, 0.42, 0.66, 0.98), (0.94, 0.3, 0.58, 0.34)),
+            ("crit_core", 0.45, (1.0, 0.54, 0.18, 0.98), (1.0, 0.38, 0.12, 0.36)),
+            ("skill_critical", 0.42, (1.0, 0.3, 0.24, 0.98), (1.0, 0.22, 0.18, 0.36)),
         ]
         weights = [entry[1] for entry in pickup_catalog]
         pickup_type, _, blade_col, glow_col = random.choices(pickup_catalog, weights=weights, k=1)[0]
@@ -4825,7 +5169,8 @@ class SoulSymphony(ShowBase):
             if self.monsters_total > 0 and self.monsters_slain >= self.monsters_total:
                 self._trigger_win()
             self._set_monster_state(monster, "dying", announce=True)
-            self._play_sound(self.sfx_monster_die, volume=0.88, play_rate=1.0)
+            if not self._play_kill_sfx():
+                self._play_sound(self.sfx_monster_die, volume=0.88, play_rate=1.0)
             self._grant_kill_protection()
             hum = monster.get("hum_sfx")
             if hum:
@@ -4864,6 +5209,7 @@ class SoulSymphony(ShowBase):
             return
 
         ball_pos = self.ball_np.getPos()
+        player_w = float(getattr(self, "player_w", 0.0))
         ball_vel = self.ball_body.getLinearVelocity()
         had_contact = False
         strongest_contact = 0.0
@@ -4878,16 +5224,25 @@ class SoulSymphony(ShowBase):
                 continue
 
             m_pos = root.getPos()
+            monster_w = float(monster.get("w", 0.0))
             delta = ball_pos - m_pos
             delta.z = 0.0
-            dist = delta.length()
             min_dist = self.ball_radius + monster["radius"] * 0.82
-            if dist >= min_dist or dist < 1e-6:
+
+            w_scale = max(0.1, float(getattr(self, "w_dimension_distance_scale", 4.0)))
+            dw_scaled = (player_w - monster_w) * w_scale
+            planar_sq = delta.lengthSquared()
+            dist4d = math.sqrt(max(0.0, planar_sq + dw_scaled * dw_scaled))
+            if dist4d >= min_dist:
+                continue
+
+            dist = math.sqrt(max(0.0, planar_sq))
+            if dist < 1e-6:
                 continue
 
             had_contact = True
             normal = delta / dist
-            penetration = min_dist - dist
+            penetration = min_dist - dist4d
 
             ball_pos += normal * (penetration * 0.62)
             m_pos -= normal * (penetration * 0.38)
@@ -4906,11 +5261,16 @@ class SoulSymphony(ShowBase):
                 self.monster_contact_sfx_cooldown = 0.1
 
             if self.player_damage_cooldown <= 0.0:
-                self._apply_player_damage(strongest_contact if strongest_contact > 0.0 else 10.0)
+                was_critical = self._apply_player_damage(strongest_contact if strongest_contact > 0.0 else 10.0)
                 if knock_normal_sum.lengthSquared() > 1e-8:
                     knock_dir = Vec3(knock_normal_sum)
                     knock_dir.normalize()
                     knock_impulse = 2.8 + strongest_contact * 0.22
+                    if was_critical:
+                        knock_impulse *= max(1.0, float(getattr(self, "critical_knockback_multiplier", 2.75)))
+                        knock_dir += Vec3(0.0, 0.0, 0.25)
+                        if knock_dir.lengthSquared() > 1e-8:
+                            knock_dir.normalize()
                     self.ball_body.applyCentralImpulse(knock_dir * knock_impulse)
                 self.player_damage_cooldown = 0.45
 
@@ -5179,6 +5539,7 @@ class SoulSymphony(ShowBase):
         self.monster_collision_update_timer = 0.0
 
         self._set_dynamic_shadows_enabled(self.enable_dynamic_shadows)
+        self._ensure_performance_player_light()
 
         if getattr(self, "enable_video_distortion", True):
             if self.video_distort_overlay_np is None or self.video_distort_overlay_np.isEmpty():
@@ -7249,6 +7610,9 @@ class SoulSymphony(ShowBase):
                 "parts": parts,
                 "velocity": velocity,
                 "knockback_vel": Vec3(0, 0, 0),
+                "jump_vel": 0.0,
+                "jump_cooldown": random.uniform(0.0, 0.45),
+                "base_z": float(spawn_pos.z),
                 "prev_pos": Vec3(root.getPos()),
                 "radius": random.uniform(0.85, 1.35) * size_scale,
                 "w": random.uniform(-self.hyper_w_limit * 0.85, self.hyper_w_limit * 0.85),
@@ -7333,6 +7697,19 @@ class SoulSymphony(ShowBase):
             monster["state_announce_cooldown"] = max(0.0, float(monster.get("state_announce_cooldown", 0.0)) - dt)
             pos = root.getPos()
             prev_pos = Vec3(monster.get("prev_pos", pos))
+            monster["jump_cooldown"] = max(0.0, float(monster.get("jump_cooldown", 0.0)) - dt)
+
+            jump_vel = float(monster.get("jump_vel", 0.0))
+            base_z = float(monster.get("base_z", pos.z))
+            if jump_vel > 0.0 or pos.z > base_z + 1e-3:
+                jump_vel -= float(getattr(self, "monster_ai_jump_gravity", 12.0)) * dt
+                pos.z += jump_vel * dt
+                if pos.z <= base_z and jump_vel <= 0.0:
+                    pos.z = base_z
+                    jump_vel = 0.0
+                root.setPos(pos)
+                monster["jump_vel"] = jump_vel
+
             knockback_vel = Vec3(monster.get("knockback_vel", Vec3(0, 0, 0)))
             if knockback_vel.lengthSquared() > 1e-8:
                 pos += knockback_vel * dt
@@ -7395,6 +7772,7 @@ class SoulSymphony(ShowBase):
                     jump_offset = Vec3(random.uniform(-0.35, 0.35), random.uniform(-0.35, 0.35), ghost)
                     root.setPos(node_pos + jump_offset)
                     pos = root.getPos()
+                    monster["base_z"] = float(pos.z)
                     target_w = float(node.get("w", 0.0))
                     monster["w"] += (target_w - float(monster.get("w", 0.0))) * 0.78
                     monster["w_vel"] = float(monster.get("w_vel", 0.0)) * 0.4 + random.uniform(-1.6, 1.6)
@@ -7406,19 +7784,34 @@ class SoulSymphony(ShowBase):
                         monster["fold_target_idx"] = self._next_liminal_fold_hop(m_idx2, b_idx2)
 
             pos = root.getPos()
-            if self._monster_move_blocked(prev_pos, pos, monster["radius"]):
+            is_in_jump_arc = float(monster.get("jump_vel", 0.0)) > 0.05
+            if (not is_in_jump_arc) and self._monster_move_blocked(prev_pos, pos, monster["radius"]):
                 fold_idx = monster.get("fold_target_idx")
                 if isinstance(fold_idx, int) and 0 <= fold_idx < len(self.liminal_fold_nodes):
                     node_pos = Vec3(self.liminal_fold_nodes[fold_idx]["pos"])
                     root.setPos(node_pos + Vec3(0, 0, 0.28))
                     pos = root.getPos()
+                    monster["base_z"] = float(pos.z)
                     target_w = float(self.liminal_fold_nodes[fold_idx].get("w", 0.0))
                     monster["w"] += (target_w - float(monster.get("w", 0.0))) * 0.82
                     monster["fold_jump_cooldown"] = random.uniform(0.35, 0.8)
                 else:
-                    root.setPos(prev_pos)
-                    pos = Vec3(prev_pos)
-                    self._set_monster_state(monster, "guarding")
+                    state_now = monster.get("state", "wandering")
+                    can_jump = (
+                        bool(getattr(self, "monster_ai_jump_enabled", True))
+                        and state_now in ("hunting", "attacking", "running")
+                        and float(monster.get("jump_cooldown", 0.0)) <= 0.0
+                    )
+                    if can_jump:
+                        up_impulse = max(0.6, float(getattr(self, "monster_ai_jump_impulse", 4.8)))
+                        monster["jump_vel"] = max(float(monster.get("jump_vel", 0.0)), up_impulse)
+                        monster["jump_cooldown"] = float(getattr(self, "monster_ai_jump_cooldown_duration", 0.9))
+                        root.setPos(prev_pos + Vec3(0, 0, 0.04))
+                        pos = root.getPos()
+                    else:
+                        root.setPos(prev_pos)
+                        pos = Vec3(prev_pos)
+                        self._set_monster_state(monster, "guarding")
 
             pos, _ = self._wrap_xy_position(pos, margin=1.6)
             root.setPos(pos)
@@ -10026,8 +10419,12 @@ class SoulSymphony(ShowBase):
         return task.cont
 
 
-if __name__ == "__main__":
+def run() -> None:
     _configure_display_prc()
     _configure_gpu_prc()
     app = SoulSymphony()
     app.run()
+
+
+if __name__ == "__main__":
+    run()

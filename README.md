@@ -45,3 +45,14 @@ python main.py
 ## Notes
 - This is intentionally lightweight and code-first.
 - Meshes are built from Panda3D primitive models and transforms for fast iteration.
+
+## WebGL (Arch WSL2)
+
+Web 向けビルドは Arch WSL2 前提の手順を用意しています。
+
+- ガイド: [docs/webgl-arch-wsl2.md](docs/webgl-arch-wsl2.md)
+- セットアップ: `bash scripts/setup_arch_webgl.sh`
+- Panda3D WebGLビルド: `bash scripts/build_panda_webgl.sh`
+- プロジェクト用freezifyスターター: `python scripts/freezify.py`
+
+注: 本プロジェクト固有の `freezify.py` は別途調整が必要です（ガイド参照）。
