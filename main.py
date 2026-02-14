@@ -608,6 +608,8 @@ class SoulSymphony(ShowBase):
         self.player_ai_jump_target_up_threshold = 0.55
         self.player_ai_jump_nav_up_threshold = 0.35
         self.player_ai_jump_probe_distance = 1.8
+        self.player_ai_jump_chase_distance_mul = 1.75
+        self.player_ai_jump_chase_chance_per_sec = 0.85
         self.player_ai_bomb_range_mul = 1.9
         self.player_ai_bomb_desire = 0.42
         self.player_ai_missile_range_mul = 4.4
@@ -2565,7 +2567,14 @@ class SoulSymphony(ShowBase):
                     if hit.hasHit() and hit.getNode() is not None and hit.getNode() != self.ball_body:
                         need_jump = True
                 except Exception:
-                    need_jump = need_jump
+                    pass
+            if not need_jump:
+                chase_mul = max(1.05, float(getattr(self, "player_ai_jump_chase_distance_mul", 1.75)))
+                chase_chance_per_sec = max(0.0, float(getattr(self, "player_ai_jump_chase_chance_per_sec", 0.85)))
+                if target_dist_4d > engage_dist * chase_mul:
+                    jump_roll = min(1.0, chase_chance_per_sec * max(0.0, dt))
+                    if random.random() < jump_roll:
+                        need_jump = True
             if need_jump:
                 self.jump_queued = True
                 self.player_ai_jump_cooldown = random.uniform(0.32, 0.55)
