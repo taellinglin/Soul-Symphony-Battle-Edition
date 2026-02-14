@@ -602,20 +602,42 @@ class SoulSymphony(ShowBase):
         self.player_ai_lock_target_id: int | None = None
         self.player_ai_lock_on_distance = 3.2
         self.player_ai_lock_release_distance = 22.0
+        self.player_ai_camera_target_pos: Vec3 | None = None
         self.player_ai_move_smooth = 7.8
         self.player_ai_target_hysteresis = 1.18
         self.player_ai_last_move_dir = Vec3(0, 1, 0)
+        self.player_ai_room_path: list[int] = []
+        self.player_ai_room_path_goal: int | None = None
+        self.player_ai_room_path_recalc_timer = 0.0
+        self.player_ai_room_path_recalc_interval = 0.28
+        self.player_ai_room_waypoint_reach = 1.45
+        self.player_ai_w_target_blend_rate = 3.6
+        self.player_ai_w_mismatch_penalty = 0.72
+        self.player_ai_fold_route_bonus = 1.15
+        self.player_ai_fold_hop_weight = 0.48
         self.player_ai_jump_target_up_threshold = 0.55
         self.player_ai_jump_nav_up_threshold = 0.35
         self.player_ai_jump_probe_distance = 1.8
         self.player_ai_jump_chase_distance_mul = 1.75
         self.player_ai_jump_chase_chance_per_sec = 0.85
+        self.player_ai_jump_roam_chance_per_sec = 0.22
+        self.player_ai_jump_attack_up_threshold = 0.28
+        self.player_ai_jump_attack_dist_mul = 1.9
+        self.player_ai_black_hole_avoid_strength = 2.4
+        self.player_ai_black_hole_avoid_margin = 1.18
+        self.player_ai_black_hole_jump_margin = 0.42
         self.player_ai_bomb_range_mul = 1.9
         self.player_ai_bomb_desire = 0.42
+        self.player_ai_bomb_cluster_radius_mul = 1.18
+        self.player_ai_bomb_cluster_min = 2
         self.player_ai_missile_range_mul = 4.4
         self.player_ai_missile_desire = 0.58
-        self.player_ai_throw_range_mul = 2.2
+        self.player_ai_missile_min_range_mul = 1.08
+        self.player_ai_throw_range_mul = 3.2
         self.player_ai_throw_desire = 0.46
+        self.player_ai_combat_hold_distance_mul = 1.35
+        self.player_ai_combat_hold_height_tolerance = 1.25
+        self.player_ai_combat_hold_move_scale = 0.2
         self.w_dimension_distance_scale = 4.0
         self.subtractive_drill_max_radius = 4
 
@@ -865,9 +887,9 @@ class SoulSymphony(ShowBase):
         self.hyperbomb_scale_start = 0.045
         self.hyperbomb_growth_speed = 18.5
         self.hyperbomb_growth_slowdown = 4.2
-        self.hyperbomb_max_scale_factor = 5.2
+        self.hyperbomb_max_scale_factor = 8.2
         self.hyperbomb_max_scale = 64.0
-        self.hyperbomb_damage_radius_factor = 1.4
+        self.hyperbomb_damage_radius_factor = 1.0
         self.hyperbomb_damage_interval = 0.08
         self.hyperbomb_damage_per_tick = 36.0
         self.hyperbomb_damage_timer = 0.0
@@ -1043,6 +1065,16 @@ class SoulSymphony(ShowBase):
             "soundfx/quigongbounce",
             "sfx/qigongbounce",
             "sfx/quigongbounce",
+        ])
+        self.sfx_qigong_jump = self._load_first_sfx_2d([
+            "qigongjump",
+            "qigong_jump",
+            "audio/qigongjump",
+            "audio/qigong_jump",
+            "soundfx/qigongjump",
+            "soundfx/qigong_jump",
+            "sfx/qigongjump",
+            "sfx/qigong_jump",
         ])
         self.sfx_pickup = self._load_first_sfx_2d([
             "pickuphealth",
@@ -1686,13 +1718,43 @@ class SoulSymphony(ShowBase):
     def _on_window_event(self, window) -> None:
         if window is None:
             return
-        if not getattr(self, "enable_video_distortion", True):
-            return
-        if self.win is None:
-            return
-        current_win_size = (int(max(1, self.win.getXSize())), int(max(1, self.win.getYSize())))
-        if current_win_size != tuple(getattr(self, "video_distort_window_size", (0, 0))):
-            self._setup_video_distortion()
+        if self.win is not None:
+            current_win_size = (int(max(1, self.win.getXSize())), int(max(1, self.win.getYSize())))
+            if getattr(self, "enable_video_distortion", True) and current_win_size != tuple(getattr(self, "video_distort_window_size", (0, 0))):
+                self._setup_video_distortion()
+        self._layout_hud_to_corners()
+
+    def _layout_hud_to_corners(self) -> None:
+        if self.win is not None:
+            win_w = float(max(1, self.win.getXSize()))
+            win_h = float(max(1, self.win.getYSize()))
+            aspect = max(0.6, min(3.5, win_w / win_h))
+        else:
+            aspect = max(0.6, min(3.5, float(self.getAspectRatio())))
+
+        left = -aspect
+        right = aspect
+        bottom = -1.0
+        top = 1.0
+
+        margin_x = max(0.05, 0.032 * aspect + 0.015)
+        margin_y = 0.055
+
+        hp_ui = getattr(self, "player_hp_ui", None)
+        if hp_ui is not None and not hp_ui.isEmpty():
+            hp_ui.setPos(left + margin_x, 0.0, top - (margin_y + 0.14))
+
+        monster_ui = getattr(self, "monster_hud_ui", None)
+        if monster_ui is not None and not monster_ui.isEmpty():
+            monster_ui.setPos(right - (margin_x + 0.72), 0.0, top - (margin_y + 0.12))
+
+        input_ui = getattr(self, "input_hud_ui", None)
+        if input_ui is not None and not input_ui.isEmpty():
+            input_ui.setPos(left + margin_x, 0.0, bottom + (margin_y + 0.09))
+
+        holo_ui = getattr(self, "holo_map_ui", None)
+        if holo_ui is not None and not holo_ui.isEmpty():
+            holo_ui.setPos(right - (margin_x + 0.315), 0.0, bottom + (margin_y + 0.295))
 
     def _update_atmosphere_lights(self, t: float) -> None:
         if hasattr(self, "ambient_light"):
@@ -2105,6 +2167,29 @@ class SoulSymphony(ShowBase):
                 best = nxt
         return best
 
+    def _liminal_fold_hop_count(self, start_idx: int, goal_idx: int, max_depth: int = 24) -> int | None:
+        if start_idx == goal_idx:
+            return 0
+        if not self.liminal_fold_nodes:
+            return None
+        if not (0 <= start_idx < len(self.liminal_fold_nodes) and 0 <= goal_idx < len(self.liminal_fold_nodes)):
+            return None
+        visited: set[int] = {start_idx}
+        q: deque[tuple[int, int]] = deque([(start_idx, 0)])
+        depth_cap = max(1, int(max_depth))
+        while q:
+            node_idx, depth = q.popleft()
+            if depth >= depth_cap:
+                continue
+            for nxt in self.liminal_fold_links.get(node_idx, []):
+                if nxt in visited:
+                    continue
+                if nxt == goal_idx:
+                    return depth + 1
+                visited.add(nxt)
+                q.append((nxt, depth + 1))
+        return None
+
     def _compression_factor_at(self, pos: Vec3, t: float) -> float:
         if not self.room_compression_pockets and not self.room_dimension_fields:
             return 1.0
@@ -2364,27 +2449,27 @@ class SoulSymphony(ShowBase):
         lock_release_dist = max(engage_dist + 1.0, float(getattr(self, "player_ai_lock_release_distance", 22.0)))
         ball_floor_z = self._floor_anchor_z_for_pos(ball_pos)
 
-        def _has_fold_route(monster_pos: Vec3, monster_w: float) -> bool:
+        def _fold_hops_to(monster_pos: Vec3, monster_w: float) -> int | None:
             if not self.liminal_fold_nodes:
-                return False
+                return None
             start_fold = self._nearest_liminal_fold_idx(ball_pos, player_w)
             goal_fold = self._nearest_liminal_fold_idx(monster_pos, monster_w)
             if start_fold is None or goal_fold is None:
-                return False
-            next_hop = self._next_liminal_fold_hop(start_fold, goal_fold)
-            return isinstance(next_hop, int)
+                return None
+            return self._liminal_fold_hop_count(start_fold, goal_fold)
 
-        def _monster_metrics(monster: dict) -> tuple[float, float, float, float, float]:
+        def _monster_metrics(monster: dict) -> tuple[float, float, float, float, float, int | None]:
             root = monster.get("root")
             if root is None or root.isEmpty():
-                return float("inf"), 0.0, float("inf"), float("inf"), float("inf")
+                return float("inf"), 0.0, float("inf"), float("inf"), float("inf"), None
             m_pos = root.getPos()
             m_w = float(monster.get("w", 0.0))
             dz = float(m_pos.z) - float(ball_pos.z)
             dw = abs(m_w - player_w)
             dist4d = self._distance4d(ball_pos, player_w, m_pos, m_w)
             floor_delta = abs(self._floor_anchor_z_for_pos(m_pos) - ball_floor_z)
-            return dist4d, dz, dw, m_w, floor_delta
+            hops = _fold_hops_to(m_pos, m_w)
+            return dist4d, dz, dw, m_w, floor_delta, hops
 
         def _find_by_id(target_id: int | None) -> dict | None:
             if target_id is None:
@@ -2397,7 +2482,7 @@ class SoulSymphony(ShowBase):
 
         locked = _find_by_id(getattr(self, "player_ai_lock_target_id", None))
         if locked is not None:
-            locked_dist4d, locked_dz, _, _, locked_floor_delta = _monster_metrics(locked)
+            locked_dist4d, locked_dz, _, _, locked_floor_delta, _ = _monster_metrics(locked)
             locked_engaging = locked_dist4d <= engage_dist
             locked_below = locked_dz < -below_margin
             locked_allowed = (not locked_below) or locked_engaging
@@ -2411,7 +2496,7 @@ class SoulSymphony(ShowBase):
         current = _find_by_id(self.player_ai_target_id)
 
         if current is not None and self.player_ai_retarget_timer > 0.0:
-            current_dist4d, current_dz, _, _, current_floor_delta = _monster_metrics(current)
+            current_dist4d, current_dz, _, _, current_floor_delta, _ = _monster_metrics(current)
             current_engaging = current_dist4d <= engage_dist
             current_below = current_dz < -below_margin
             if ((not current_below) and current_floor_delta <= floor_tol * 1.35) or current_engaging:
@@ -2424,18 +2509,17 @@ class SoulSymphony(ShowBase):
         candidates_same_plane_same_w: list[dict] = []
         candidates_same_floor_plane_same_w: list[dict] = []
         for monster in alive:
-            dist4d, dz, dw, m_w, floor_delta = _monster_metrics(monster)
+            dist4d, dz, dw, m_w, floor_delta, fold_hops = _monster_metrics(monster)
             root = monster.get("root")
             if root is None or root.isEmpty():
                 continue
-            m_pos = root.getPos()
             engaging = dist4d <= engage_dist
             if dz < -below_margin and not engaging:
                 continue
             if floor_delta > floor_tol * 1.45 and not engaging:
                 continue
             if dw > w_plane_tol * 1.7 and not engaging:
-                if not _has_fold_route(m_pos, m_w):
+                if fold_hops is None:
                     continue
             candidates.append(monster)
             same_floor = floor_delta <= floor_tol
@@ -2467,8 +2551,18 @@ class SoulSymphony(ShowBase):
             return None
 
         def _score(monster: dict) -> float:
-            dist4d, dz, dw, _, floor_delta = _monster_metrics(monster)
-            return dist4d + abs(dz) * 0.4 + dw * 0.35 + floor_delta * 0.95
+            dist4d, dz, dw, _, floor_delta, fold_hops = _monster_metrics(monster)
+            w_penalty = max(0.0, float(getattr(self, "player_ai_w_mismatch_penalty", 0.72)))
+            fold_hop_weight = max(0.0, float(getattr(self, "player_ai_fold_hop_weight", 0.48)))
+            fold_route_bonus = max(0.0, float(getattr(self, "player_ai_fold_route_bonus", 1.15)))
+            score = dist4d + abs(dz) * 0.4 + dw * w_penalty + floor_delta * 0.95
+            if fold_hops is None:
+                score += 3.5
+            else:
+                score += float(fold_hops) * fold_hop_weight
+                if dw > w_plane_tol:
+                    score -= fold_route_bonus
+            return score
 
         best = min(pool, key=_score)
         if current is not None and current in pool:
@@ -2484,8 +2578,12 @@ class SoulSymphony(ShowBase):
 
     def _update_player_ai(self, dt: float) -> Vec3 | None:
         if not self.player_ai_enabled or self.game_over_active or self.win_active:
+            self.player_ai_camera_target_pos = None
+            self.player_ai_target_w = float(getattr(self, "player_w", 0.0))
             return None
         if not hasattr(self, "ball_np"):
+            self.player_ai_camera_target_pos = None
+            self.player_ai_target_w = float(getattr(self, "player_w", 0.0))
             return None
 
         self.player_ai_combo_timer = max(0.0, self.player_ai_combo_timer - dt)
@@ -2495,18 +2593,24 @@ class SoulSymphony(ShowBase):
         alive = self._get_alive_monster_entries()
         if not alive:
             self._trigger_win()
+            self.player_ai_camera_target_pos = None
+            self.player_ai_target_w = float(getattr(self, "player_w", 0.0))
             return None
 
+        player_w = float(getattr(self, "player_w", 0.0))
         target = self._choose_player_ai_target(alive, ball_pos)
         if target is None:
+            self.player_ai_camera_target_pos = None
+            self.player_ai_target_w = float(getattr(self, "player_w", 0.0))
             return None
         target_root = target.get("root")
         if target_root is None or target_root.isEmpty():
+            self.player_ai_camera_target_pos = None
+            self.player_ai_target_w = float(getattr(self, "player_w", 0.0))
             return None
         target_pos = target_root.getPos()
         target_w = float(target.get("w", 0.0))
-        player_w = float(getattr(self, "player_w", 0.0))
-        self.player_ai_target_w = target_w
+        self.player_ai_camera_target_pos = Vec3(target_pos)
         engage_dist = max(0.5, float(getattr(self, "player_ai_engage_distance", 2.35)))
         lock_on_dist = max(engage_dist, float(getattr(self, "player_ai_lock_on_distance", 3.2)))
         lock_release_dist = max(lock_on_dist + 0.5, float(getattr(self, "player_ai_lock_release_distance", 22.0)))
@@ -2514,6 +2618,8 @@ class SoulSymphony(ShowBase):
         start_room = self._get_current_room_idx_for_pos(ball_pos)
         goal_room = self._get_current_room_idx_for_pos(target_pos)
         nav_target = Vec3(target_pos)
+        w_target_goal = float(target_w)
+        using_fold_nav = False
         if self.liminal_fold_nodes and abs(target_w - player_w) > 0.35:
             start_fold = self._nearest_liminal_fold_idx(ball_pos, player_w)
             goal_fold = self._nearest_liminal_fold_idx(target_pos, target_w)
@@ -2521,12 +2627,84 @@ class SoulSymphony(ShowBase):
                 next_hop = self._next_liminal_fold_hop(start_fold, goal_fold)
                 if isinstance(next_hop, int) and 0 <= next_hop < len(self.liminal_fold_nodes):
                     nav_target = Vec3(self.liminal_fold_nodes[next_hop]["pos"])
-        if start_room is not None and goal_room is not None and start_room != goal_room:
-            path = self._find_room_path(start_room, goal_room)
-            if len(path) >= 2:
-                nav_target = self._room_center_pos(path[1])
+                    w_target_goal = float(self.liminal_fold_nodes[next_hop].get("w", target_w))
+                    using_fold_nav = True
+
+        if using_fold_nav:
+            self.player_ai_room_path = []
+            self.player_ai_room_path_goal = None
+            self.player_ai_room_path_recalc_timer = 0.0
+        elif start_room is not None and goal_room is not None and start_room != goal_room:
+            self.player_ai_room_path_recalc_timer = max(0.0, float(getattr(self, "player_ai_room_path_recalc_timer", 0.0)) - dt)
+            recalc_interval = max(0.05, float(getattr(self, "player_ai_room_path_recalc_interval", 0.28)))
+            current_path = list(getattr(self, "player_ai_room_path", []))
+            current_goal = getattr(self, "player_ai_room_path_goal", None)
+            need_recalc = (
+                current_goal != goal_room
+                or self.player_ai_room_path_recalc_timer <= 0.0
+                or len(current_path) < 2
+                or start_room not in current_path
+            )
+            if need_recalc:
+                current_path = self._find_room_path(start_room, goal_room)
+                self.player_ai_room_path_goal = goal_room
+                self.player_ai_room_path_recalc_timer = recalc_interval
+
+            if current_path and start_room in current_path:
+                start_idx = current_path.index(start_room)
+                current_path = current_path[start_idx:]
+
+            waypoint_reach = max(0.25, float(getattr(self, "player_ai_room_waypoint_reach", 1.45)))
+            if len(current_path) >= 2:
+                waypoint_room = current_path[1]
+                waypoint_pos = self._room_center_pos(waypoint_room)
+                if (waypoint_pos - ball_pos).length() <= waypoint_reach:
+                    current_path = current_path[1:]
+                    if len(current_path) >= 2:
+                        waypoint_pos = self._room_center_pos(current_path[1])
+                if len(current_path) >= 2:
+                    nav_target = waypoint_pos
+
+            self.player_ai_room_path = current_path
+        else:
+            self.player_ai_room_path = []
+            self.player_ai_room_path_goal = None
+            self.player_ai_room_path_recalc_timer = 0.0
+
+        w_target_rate = max(0.1, float(getattr(self, "player_ai_w_target_blend_rate", 3.6)))
+        current_target_w = float(getattr(self, "player_ai_target_w", player_w))
+        w_target_alpha = min(1.0, dt * w_target_rate)
+        self.player_ai_target_w = current_target_w + (w_target_goal - current_target_w) * w_target_alpha
 
         nav_delta = nav_target - ball_pos
+        avoid_strength = max(0.0, float(getattr(self, "player_ai_black_hole_avoid_strength", 2.4)))
+        avoid_margin = max(1.0, float(getattr(self, "player_ai_black_hole_avoid_margin", 1.18)))
+        jump_margin = self._clamp(float(getattr(self, "player_ai_black_hole_jump_margin", 0.42)), 0.05, 0.9)
+        escape_vec = Vec3(0, 0, 0)
+        nearest_pull_ratio = 0.0
+        if avoid_strength > 1e-6:
+            for anomaly in getattr(self, "black_holes", []):
+                if str(anomaly.get("kind", "suck")).lower() != "suck":
+                    continue
+                root = anomaly.get("root")
+                if root is None or root.isEmpty():
+                    continue
+                pos = root.getPos(self.render)
+                to_center = pos - ball_pos
+                dist = max(1e-5, to_center.length())
+                radius = max(0.8, float(anomaly.get("radius", getattr(self, "black_hole_influence_radius", 15.5))))
+                outer = radius * avoid_margin
+                if dist > outer:
+                    continue
+                away = -to_center / dist
+                pull_ratio = self._clamp((outer - dist) / max(1e-5, outer), 0.0, 1.0)
+                nearest_pull_ratio = max(nearest_pull_ratio, pull_ratio)
+                escape_vec += away * (pull_ratio * pull_ratio)
+
+        if escape_vec.lengthSquared() > 1e-8:
+            escape_vec.normalize()
+            nav_delta += escape_vec * (max(0.5, nav_delta.length()) * avoid_strength * nearest_pull_ratio)
+
         target_delta = target_pos - ball_pos
         move_vec = Vec3(nav_delta)
         gravity_up = self._get_gravity_up()
@@ -2559,6 +2737,13 @@ class SoulSymphony(ShowBase):
             nav_up_threshold = max(float(getattr(self, "player_ai_jump_nav_up_threshold", 0.35)), self.ball_radius * 0.45)
             need_jump = target_up_delta > target_up_threshold or nav_up_delta > nav_up_threshold
             if not need_jump:
+                attack_up_threshold = max(0.08, float(getattr(self, "player_ai_jump_attack_up_threshold", 0.28)))
+                attack_dist_mul = max(1.0, float(getattr(self, "player_ai_jump_attack_dist_mul", 1.9)))
+                if target_up_delta > attack_up_threshold and target_dist_4d <= engage_dist * attack_dist_mul:
+                    need_jump = True
+            if not need_jump and nearest_pull_ratio >= jump_margin:
+                need_jump = True
+            if not need_jump:
                 ray_from = ball_pos + gravity_up * (self.ball_radius * 0.16)
                 probe_dist = max(1.2, float(getattr(self, "player_ai_jump_probe_distance", 1.8)))
                 ray_to = ray_from + move_vec * probe_dist
@@ -2575,10 +2760,19 @@ class SoulSymphony(ShowBase):
                     jump_roll = min(1.0, chase_chance_per_sec * max(0.0, dt))
                     if random.random() < jump_roll:
                         need_jump = True
+            if not need_jump:
+                roam_chance_per_sec = max(0.0, float(getattr(self, "player_ai_jump_roam_chance_per_sec", 0.22)))
+                moving_enough = move_vec.lengthSquared() > 0.04
+                if moving_enough:
+                    jump_roll = min(1.0, roam_chance_per_sec * max(0.0, dt))
+                    if random.random() < jump_roll:
+                        need_jump = True
             if need_jump:
                 self.jump_queued = True
                 self.player_ai_jump_cooldown = random.uniform(0.32, 0.55)
 
+        combat_hold = False
+        combat_hold_scale = 1.0
         if self.attack_mode == "idle" and self.attack_cooldown <= 0.0:
             bomb_range = max(self.sword_reach * 0.9, self.sword_reach * float(getattr(self, "player_ai_bomb_range_mul", 1.9)))
             bomb_desire = self._clamp(float(getattr(self, "player_ai_bomb_desire", 0.42)), 0.0, 1.0)
@@ -2586,37 +2780,73 @@ class SoulSymphony(ShowBase):
             missile_desire = self._clamp(float(getattr(self, "player_ai_missile_desire", 0.58)), 0.0, 1.0)
             throw_range = max(self.sword_reach * 0.95, self.sword_reach * float(getattr(self, "player_ai_throw_range_mul", 2.2)))
             throw_desire = self._clamp(float(getattr(self, "player_ai_throw_desire", 0.46)), 0.0, 1.0)
+            missile_min_range = max(self.sword_reach * 0.85, self.sword_reach * float(getattr(self, "player_ai_missile_min_range_mul", 1.08)))
+
+            crowd_close_count = 0
+            crowd_mid_count = 0
+            bomb_cluster_radius = max(self.sword_reach * 0.75, bomb_range * float(getattr(self, "player_ai_bomb_cluster_radius_mul", 1.18)))
+            for monster in alive:
+                root = monster.get("root")
+                if root is None or root.isEmpty():
+                    continue
+                dist = self._distance4d(ball_pos, player_w, root.getPos(), float(monster.get("w", 0.0)))
+                if dist <= bomb_cluster_radius:
+                    crowd_close_count += 1
+                if dist <= throw_range:
+                    crowd_mid_count += 1
+
+            cluster_min = max(2, int(getattr(self, "player_ai_bomb_cluster_min", 2)))
+            close_quarters = target_dist_4d <= self.sword_reach * 0.62
+            bomb_zone = target_dist_4d <= bomb_range
+            missile_zone = target_dist_4d >= missile_min_range and target_dist_4d <= missile_range
+
+            hold_dist_mul = max(0.8, float(getattr(self, "player_ai_combat_hold_distance_mul", 1.35)))
+            hold_dist = max(self.sword_reach * 0.75, self.sword_reach * hold_dist_mul)
+            hold_height_tol = max(0.2, float(getattr(self, "player_ai_combat_hold_height_tolerance", 1.25)))
+            hold_scale = self._clamp(float(getattr(self, "player_ai_combat_hold_move_scale", 0.2)), 0.0, 1.0)
+            if target_dist_4d <= hold_dist and abs(target_up_delta) <= hold_height_tol:
+                combat_hold = True
+                combat_hold_scale = min(combat_hold_scale, hold_scale)
+            if bomb_zone and (close_quarters or crowd_close_count >= cluster_min):
+                combat_hold = True
+                combat_hold_scale = min(combat_hold_scale, hold_scale * 0.75)
 
             should_missile = (
-                target_dist_4d <= missile_range
+                missile_zone
                 and self.magic_missile_cooldown <= 0.0
-                and (target_dist_4d > self.sword_reach * 0.82 or self.player_ai_combo_step % 5 == 0)
+                and target_dist_4d > self.sword_reach * 0.82
+                and (target_up_delta > 0.12 or crowd_mid_count <= 1 or self.player_ai_combo_step % 5 == 0)
                 and (self.player_ai_combo_step % 4 == 2 or random.random() < missile_desire)
             )
             should_bomb = (
-                target_dist_4d <= bomb_range
+                bomb_zone
                 and self.hyperbomb_cooldown <= 0.0
-                and (self.player_ai_combo_step % 3 == 1 or random.random() < bomb_desire)
+                and (
+                    close_quarters
+                    or crowd_close_count >= cluster_min
+                    or self.player_ai_combo_step % 3 == 1
+                    or random.random() < bomb_desire
+                )
             )
 
-            if should_missile:
-                self._trigger_magic_missile_attack()
-                self.player_ai_combo_step = (self.player_ai_combo_step + 1) % 8
-                self.player_ai_combo_timer = random.uniform(0.18, 0.34)
-            elif should_bomb:
+            if should_bomb:
                 self._trigger_hyperbomb()
                 self.player_ai_combo_step = (self.player_ai_combo_step + 1) % 8
                 self.player_ai_combo_timer = random.uniform(0.2, 0.4)
+            elif should_missile:
+                self._trigger_magic_missile_attack()
+                self.player_ai_combo_step = (self.player_ai_combo_step + 1) % 8
+                self.player_ai_combo_timer = random.uniform(0.18, 0.34)
             elif target_dist_4d <= self.sword_reach * 0.95:
                 if self.player_ai_combo_timer <= 0.0:
                     self.player_ai_combo_step = (self.player_ai_combo_step + 1) % 8
-                close_quarters = target_dist_4d <= self.sword_reach * 0.62
                 should_throw = (
                     target_dist_4d >= self.sword_reach * 0.58
                     and target_dist_4d <= throw_range
+                    and crowd_close_count < cluster_min
                     and (self.player_ai_combo_step in (1, 5, 7) or random.random() < throw_desire)
                 )
-                favor_spin = close_quarters or self.player_ai_combo_step in (0, 2, 4, 6)
+                favor_spin = close_quarters or crowd_close_count >= cluster_min or self.player_ai_combo_step in (0, 2, 4, 6)
                 if should_throw:
                     self._trigger_throw_attack()
                 elif favor_spin:
@@ -2628,6 +2858,15 @@ class SoulSymphony(ShowBase):
                 self._trigger_throw_attack()
                 self.player_ai_combo_step = (self.player_ai_combo_step + 1) % 8
                 self.player_ai_combo_timer = random.uniform(0.16, 0.3)
+
+        if not combat_hold and target_dist_4d <= self.sword_reach * 0.95 and abs(target_up_delta) <= self.ball_radius * 2.2:
+            combat_hold = True
+            fallback_hold = self._clamp(float(getattr(self, "player_ai_combat_hold_move_scale", 0.2)) * 0.85, 0.0, 1.0)
+            combat_hold_scale = min(combat_hold_scale, fallback_hold)
+        if combat_hold:
+            move_vec *= max(0.0, combat_hold_scale)
+            if move_vec.lengthSquared() <= 1e-6:
+                return None
 
         return move_vec
 
@@ -3218,6 +3457,7 @@ class SoulSymphony(ShowBase):
     def _queue_jump(self) -> None:
         if self.game_over_active:
             return
+        self._play_sound(self.sfx_qigong_jump, volume=0.9, play_rate=1.0)
         queue_jump(self)
 
     def _on_escape_pressed(self) -> None:
@@ -4496,9 +4736,9 @@ class SoulSymphony(ShowBase):
         body.setName("mm-body")
         body.clearTexture()
         body.setColor(0.25, 0.9, 1.0, 1.0)
-        body.setScale(0.42, 0.42, 1.35)
+        body.setScale(0.36, 1.05, 0.36)
         body.setPos(0.0, 0.0, 0.0)
-        body.setHpr(45.0, 24.0, 45.0)
+        body.setHpr(0.0, 0.0, 0.0)
         body.clearTransparency()
         body.setLightOff(1)
         body.setShaderOff(1)
@@ -4520,8 +4760,9 @@ class SoulSymphony(ShowBase):
         nose.setName("mm-nose")
         nose.clearTexture()
         nose.setColor(0.95, 1.0, 0.7, 0.98)
-        nose.setScale(0.34, 0.34, 0.62)
-        nose.setPos(0.0, 0.0, 1.45)
+        nose.setScale(0.3, 0.3, 0.56)
+        nose.setPos(0.0, 1.06, 0.0)
+        nose.setP(90.0)
         nose.setTransparency(TransparencyAttrib.MAlpha)
         nose.setLightOff(1)
         nose.setShaderOff(1)
@@ -4542,8 +4783,8 @@ class SoulSymphony(ShowBase):
         flare.setName("mm-flare")
         flare.clearTexture()
         flare.setColor(0.45, 1.0, 1.0, 0.52)
-        flare.setScale(0.62, 0.62, 0.42)
-        flare.setPos(0.0, 0.0, 0.1)
+        flare.setScale(0.42, 0.42, 0.32)
+        flare.setPos(0.0, -0.46, 0.0)
         flare.setTransparency(TransparencyAttrib.MAlpha)
         flare.setDepthWrite(False)
         flare.setBin("transparent", 20)
@@ -4562,8 +4803,8 @@ class SoulSymphony(ShowBase):
         halo.setName("mm-halo")
         halo.clearTexture()
         halo.setColor(0.72, 1.0, 1.0, 0.65)
-        halo.setScale(1.0, 1.0, 0.86)
-        halo.setPos(0.0, 0.0, 0.35)
+        halo.setScale(0.72, 0.72, 0.64)
+        halo.setPos(0.0, 0.16, 0.0)
         halo.setTransparency(TransparencyAttrib.MAlpha)
         halo.setDepthWrite(False)
         halo.setDepthTest(False)
@@ -4571,6 +4812,27 @@ class SoulSymphony(ShowBase):
         halo.setLightOff(1)
         halo.setMaterial(flare_material, 1)
         halo.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne,
+            ),
+            1,
+        )
+
+        core = self.sphere_model.copyTo(template)
+        core.setName("mm-core")
+        core.clearTexture()
+        core.setColor(0.95, 1.0, 1.0, 0.96)
+        core.setScale(0.22, 0.22, 0.22)
+        core.setPos(0.0, 0.48, 0.0)
+        core.setTransparency(TransparencyAttrib.MAlpha)
+        core.setDepthWrite(False)
+        core.setDepthTest(False)
+        core.setBin("transparent", 61)
+        core.setLightOff(1)
+        core.setMaterial(flare_material, 1)
+        core.setAttrib(
             ColorBlendAttrib.make(
                 ColorBlendAttrib.MAdd,
                 ColorBlendAttrib.OIncomingAlpha,
@@ -4641,6 +4903,7 @@ class SoulSymphony(ShowBase):
         speed = max(1.0, float(getattr(self, "magic_missile_speed", 25.0)))
         for idx in range(count):
             missile_np = self.magic_missile_template.copyTo(self.render)
+            missile_np.show()
             spread = (idx - (count - 1) * 0.5)
             spawn_pos = cast_pos + right * (spread * 0.55) + up * (0.16 * abs(spread))
             missile_np.setPos(spawn_pos)
@@ -4661,6 +4924,7 @@ class SoulSymphony(ShowBase):
                     "nose": missile_np.find("**/mm-nose"),
                     "flare": missile_np.find("**/mm-flare"),
                     "halo": missile_np.find("**/mm-halo"),
+                    "core": missile_np.find("**/mm-core"),
                     "vel": dir_vec * speed,
                     "age": 0.0,
                     "life": float(getattr(self, "magic_missile_life", 4.2)),
@@ -4711,12 +4975,12 @@ class SoulSymphony(ShowBase):
                 node.removeNode()
         self.magic_missile_trails.clear()
 
-    def _spawn_magic_missile_trail(self, pos: Vec3, color: tuple[float, float, float], scale: float = 0.42, life: float = 0.22) -> None:
+    def _spawn_magic_missile_trail(self, pos: Vec3, color: tuple[float, float, float], scale: float = 0.26, life: float = 0.22) -> None:
         node = self.sphere_model.copyTo(self.render)
         node.setPos(pos)
         node.setScale(scale)
         node.clearTexture()
-        node.setColor(color[0], color[1], color[2], 0.58)
+        node.setColor(color[0], color[1], color[2], 0.82)
         node.setTransparency(TransparencyAttrib.MAlpha)
         node.setDepthWrite(False)
         node.setDepthTest(False)
@@ -4736,7 +5000,7 @@ class SoulSymphony(ShowBase):
                 "age": 0.0,
                 "life": max(0.05, life),
                 "scale": max(0.05, scale),
-                "alpha": 0.58,
+                "alpha": 0.82,
             }
         )
 
@@ -4855,15 +5119,16 @@ class SoulSymphony(ShowBase):
             nose_np = entry.get("nose")
             flare_np = entry.get("flare")
             halo_np = entry.get("halo")
+            core_np = entry.get("core")
             hue_base = (self.roll_time * color_cycle_rate + float(entry.get("phase", 0.0)) * 0.37) % 1.0
             b_r, b_g, b_b = colorsys.hsv_to_rgb(hue_base, 0.92, 1.0)
             n_r, n_g, n_b = colorsys.hsv_to_rgb((hue_base + 0.12) % 1.0, 0.85, 1.0)
             f_r, f_g, f_b = colorsys.hsv_to_rgb((hue_base + 0.24) % 1.0, 0.72, 1.0)
             pulse = 0.72 + 0.28 * math.sin(self.roll_time * 27.0 + float(entry.get("phase", 0.0)) * 2.0)
             if body_np is not None and not body_np.isEmpty():
-                body_np.setColor(b_r * pulse, b_g * pulse, b_b * pulse, 0.92)
+                body_np.setColor(b_r * pulse, b_g * pulse, b_b * pulse, 1.0)
             if nose_np is not None and not nose_np.isEmpty():
-                nose_np.setColor(n_r, n_g, n_b, 0.96)
+                nose_np.setColor(n_r, n_g, n_b, 1.0)
             if flare_np is not None and not flare_np.isEmpty():
                 flare_np.setColor(f_r * 1.1, f_g * 1.1, f_b * 1.1, 0.5)
                 flare_scale = 0.3 + 0.22 * pulse
@@ -4872,10 +5137,14 @@ class SoulSymphony(ShowBase):
                 halo_np.setColor(f_r * 1.2, f_g * 1.2, f_b * 1.2, 0.62)
                 halo_scale = 0.82 + 0.34 * pulse
                 halo_np.setScale(halo_scale, halo_scale, halo_scale * 0.86)
+            if core_np is not None and not core_np.isEmpty():
+                core_np.setColor(f_r * 1.35, f_g * 1.35, f_b * 1.35, 0.94)
+                core_scale = 0.24 + 0.16 * pulse
+                core_np.setScale(core_scale, core_scale, core_scale)
 
             entry["trail_timer"] = float(entry.get("trail_timer", 0.0)) - dt
             if entry["trail_timer"] <= 0.0:
-                self._spawn_magic_missile_trail(next_pos, (f_r, f_g, f_b), scale=0.42, life=0.2)
+                self._spawn_magic_missile_trail(next_pos, (f_r, f_g, f_b), scale=0.26, life=0.2)
                 entry["trail_timer"] += max(0.008, float(getattr(self, "magic_missile_trail_emit_interval", 0.02)))
 
             if target is not None:
@@ -5636,6 +5905,7 @@ class SoulSymphony(ShowBase):
 
         self._update_player_health_ui()
         self._update_monster_hud_ui()
+        self._layout_hud_to_corners()
 
     def _setup_input_hud(self) -> None:
         if not bool(getattr(self, "input_hud_enabled", True)):
@@ -5729,6 +5999,7 @@ class SoulSymphony(ShowBase):
         add_button("mouse3", "R", 0.088, 0.058, parent=mouse_root, frame=(-0.072, 0.072, -0.056, 0.056), label_scale=0.034)
 
         self.input_hud_ui = root
+        self._layout_hud_to_corners()
 
     def _update_input_hud(self, dt: float) -> None:
         if not bool(getattr(self, "input_hud_enabled", True)):
@@ -5818,6 +6089,7 @@ class SoulSymphony(ShowBase):
         self.holo_map_ui = root
         self.holo_map_marker_root = marker_root
         self.holo_map_markers = []
+        self._layout_hud_to_corners()
 
     def _add_holo_map_marker(self, x: float, z: float, size: float, color: tuple[float, float, float, float]) -> None:
         if self.holo_map_marker_root is None or self.holo_map_marker_root.isEmpty():
@@ -6116,6 +6388,9 @@ class SoulSymphony(ShowBase):
         self.player_ai_combo_step = 0
         self.player_ai_combo_timer = 0.0
         self.player_ai_jump_cooldown = 0.0
+        self.player_ai_room_path = []
+        self.player_ai_room_path_goal = None
+        self.player_ai_room_path_recalc_timer = 0.0
         self.player_ai_idle_timer = self.player_ai_idle_delay
         self.player_ai_enabled = True
 
@@ -6154,6 +6429,14 @@ class SoulSymphony(ShowBase):
             return
 
         idx = len(self.kill_protection_rings)
+        band_cycle = ("strength", "neutral", "other")
+        band_kind = band_cycle[idx % len(band_cycle)]
+        band_colors = {
+            "strength": (1.0, 0.24, 0.24),
+            "neutral": (0.24, 0.66, 1.0),
+            "other": (0.24, 1.0, 0.44),
+        }
+        base_col = band_colors.get(band_kind, (0.24, 0.66, 1.0))
         ring = self.sphere_model.copyTo(self.kill_protection_root)
         ring.clearTexture()
         ring.setLightOff(1)
@@ -6161,15 +6444,18 @@ class SoulSymphony(ShowBase):
         ring.setDepthWrite(False)
         ring.setBin("transparent", 38)
         ring.setScale(self.ball_radius * 1.3, self.ball_radius * 1.3, self.ball_radius * 0.08)
-        ring.setColor(0.24, 0.95, 1.0, 0.42)
-        ring.setPos(0, 0, 0.12 + idx * 0.03)
+        ring.setColor(base_col[0], base_col[1], base_col[2], 0.42)
+        ring.setPos(0, 0, 0)
 
         self.kill_protection_rings.append(
             {
                 "node": ring,
+                "band_kind": band_kind,
+                "base_col": base_col,
                 "phase": random.uniform(0.0, math.tau),
                 "speed": random.uniform(1.8, 3.4),
-                "height": 0.12 + idx * 0.03,
+                "tilt_p": random.uniform(-62.0, 62.0),
+                "tilt_r": random.uniform(-62.0, 62.0),
             }
         )
         self._spawn_floating_text(self.ball_np.getPos() + Vec3(0, 0, 0.7), "GUARD +1", (0.3, 0.96, 1.0, 1.0), scale=0.24, life=0.8)
@@ -6197,6 +6483,11 @@ class SoulSymphony(ShowBase):
         if not self.kill_protection_rings:
             return
 
+        max_stacks = max(1, int(getattr(self, "kill_protection_max_stacks", 24)))
+        stack_ratio = self._clamp(float(stacks) / float(max_stacks), 0.0, 1.0)
+        spin_boost = 1.0 + stack_ratio * 1.8
+        scale_boost = stack_ratio * 0.55
+
         keep: list[dict] = []
         for idx, ring_entry in enumerate(self.kill_protection_rings):
             node = ring_entry.get("node")
@@ -6204,14 +6495,26 @@ class SoulSymphony(ShowBase):
                 continue
             phase = ring_entry.get("phase", 0.0)
             speed = ring_entry.get("speed", 2.0)
-            base_h = ring_entry.get("height", 0.1)
-            bob = 0.06 * math.sin(self.roll_time * speed + phase)
+            tilt_p = float(ring_entry.get("tilt_p", 0.0))
+            tilt_r = float(ring_entry.get("tilt_r", 0.0))
             pulse = 0.5 + 0.5 * math.sin(self.roll_time * (speed * 1.4) + phase)
-            node.setPos(0, 0, base_h + bob)
-            node.setH(self.roll_time * (60.0 + idx * 18.0))
-            ring_scale = self.ball_radius * (1.28 + idx * 0.06 + pulse * 0.08)
-            node.setScale(ring_scale, ring_scale, self.ball_radius * 0.07)
-            node.setColor(0.24 + pulse * 0.14, 0.86 + pulse * 0.14, 1.0, 0.22 + pulse * 0.32)
+            node.setPos(0, 0, 0)
+            spin_deg = self.roll_time * ((56.0 + idx * 16.0) * speed * spin_boost)
+            node.setHpr(spin_deg + math.degrees(phase), tilt_p, tilt_r)
+            ring_scale = self.ball_radius * (1.1 + idx * 0.05 + scale_boost + pulse * 0.08)
+            ring_thickness = self.ball_radius * (0.055 + idx * 0.003 + stack_ratio * 0.045)
+            node.setScale(ring_scale, ring_scale, ring_thickness)
+            base_col = ring_entry.get("base_col", (0.24, 0.66, 1.0))
+            base_r = float(base_col[0])
+            base_g = float(base_col[1])
+            base_b = float(base_col[2])
+            tint = 0.82 + pulse * 0.28
+            node.setColor(
+                min(1.0, base_r * tint),
+                min(1.0, base_g * tint),
+                min(1.0, base_b * tint),
+                0.22 + pulse * 0.32,
+            )
             keep.append(ring_entry)
         self.kill_protection_rings = keep
 
@@ -11972,6 +12275,11 @@ class SoulSymphony(ShowBase):
             self.player_ai_retarget_timer = 0.0
             self.player_ai_combo_step = 0
             self.player_ai_combo_timer = 0.0
+            self.player_ai_camera_target_pos = None
+            self.player_ai_target_w = float(getattr(self, "player_w", 0.0))
+            self.player_ai_room_path = []
+            self.player_ai_room_path_goal = None
+            self.player_ai_room_path_recalc_timer = 0.0
         else:
             self.player_ai_idle_timer = min(self.player_ai_idle_delay, self.player_ai_idle_timer + dt)
             if self.player_ai_idle_timer >= self.player_ai_idle_delay:
@@ -12306,14 +12614,25 @@ class SoulSymphony(ShowBase):
 
         planar_vel = velocity - gravity_up * velocity.dot(gravity_up)
         planar_speed = planar_vel.length()
-        if self.camera_manual_turn_hold <= 0.0 and planar_speed > self.camera_auto_align_min_speed:
-            planar_dir = Vec3(planar_vel)
-            planar_dir.normalize()
-            sin_term = gravity_up.dot(ref_forward.cross(planar_dir))
-            cos_term = max(-1.0, min(1.0, ref_forward.dot(planar_dir)))
-            desired_heading = math.degrees(math.atan2(sin_term, cos_term))
-            delta_heading = (desired_heading - self.heading + 180.0) % 360.0 - 180.0
-            self.heading += delta_heading * min(1.0, dt * self.camera_auto_align_speed)
+        if self.camera_manual_turn_hold <= 0.0:
+            desired_planar_dir: Vec3 | None = None
+            if (not manual_move_active) and bool(getattr(self, "player_ai_enabled", False)):
+                ai_target = getattr(self, "player_ai_camera_target_pos", None)
+                if isinstance(ai_target, Vec3):
+                    to_target = Vec3(ai_target) - ball_pos
+                    to_target -= gravity_up * to_target.dot(gravity_up)
+                    if to_target.lengthSquared() > 1e-6:
+                        to_target.normalize()
+                        desired_planar_dir = to_target
+            if desired_planar_dir is None and planar_speed > self.camera_auto_align_min_speed:
+                desired_planar_dir = Vec3(planar_vel)
+                desired_planar_dir.normalize()
+            if desired_planar_dir is not None:
+                sin_term = gravity_up.dot(ref_forward.cross(desired_planar_dir))
+                cos_term = max(-1.0, min(1.0, ref_forward.dot(desired_planar_dir)))
+                desired_heading = math.degrees(math.atan2(sin_term, cos_term))
+                delta_heading = (desired_heading - self.heading + 180.0) % 360.0 - 180.0
+                self.heading += delta_heading * min(1.0, dt * self.camera_auto_align_speed)
 
         heading_offset = 180.0 if self._is_ceiling_mode() else 0.0
         yaw = math.radians(self.heading + heading_offset)
