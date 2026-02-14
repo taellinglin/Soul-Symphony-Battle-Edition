@@ -23,7 +23,7 @@ except Exception:
     AICharacter = None
     AIWorld = None
 from panda3d.bullet import BulletBoxShape, BulletRigidBodyNode, BulletWorld
-from panda3d.core import AmbientLight, BitMask32, CardMaker, CullFaceAttrib, DirectionalLight, Fog, LightRampAttrib, LineSegs, NodePath, PNMImage, Point2, PointLight, Shader, TexGenAttrib, TextNode, Texture, TextureStage, TransparencyAttrib, Vec2, Vec3, WindowProperties, loadPrcFileData
+from panda3d.core import AmbientLight, BitMask32, CardMaker, ColorBlendAttrib, CullFaceAttrib, DirectionalLight, Fog, LightRampAttrib, LineSegs, Material, NodePath, PNMImage, Point2, PointLight, Shader, TexGenAttrib, TextNode, Texture, TextureStage, TransparencyAttrib, Vec2, Vec3, WindowProperties, loadPrcFileData
 
 from camera import camera_orbit_position, resolve_camera_collision, rotate_around_axis, setup_camera
 from ball_visuals import spawn_player_ball
@@ -208,7 +208,7 @@ class SoulSymphony(ShowBase):
         self.ripple_alpha_strength = 0.85
         self.motion_trails: list[dict] = []
         self.motion_trail_emit_timer = 0.0
-        self.performance_mode = False
+        self.performance_mode = True
         self.safe_render_mode = _env_flag("SOULSYM_SAFE_RENDER", True)
         self.enable_particles = False
         self.enable_gravity_particles = False
@@ -225,6 +225,10 @@ class SoulSymphony(ShowBase):
         self.video_bloom_strength = 0.18
         self.video_bloom_radius = 0.9
         self.video_bloom_threshold = 0.52
+        self.video_distort_compression_response = 1.25
+        self.video_distort_sine_response = 0.52
+        self.video_distort_dynamic_min_mul = 0.62
+        self.video_distort_dynamic_max_mul = 2.75
         self.video_distort_update_timer = 0.0
         self.video_distort_update_interval = 1.0 / 30.0
         self.video_distort_overlay_np: NodePath | None = None
@@ -288,16 +292,49 @@ class SoulSymphony(ShowBase):
         self.level_additive_stage.setColor((add_gain, add_gain, add_gain, 1.0))
         self.floor_fractal_tex_a = self._create_fractal_symmetry_texture(size=256, symmetry=6, seed=0.37)
         self.floor_fractal_tex_b = self._create_fractal_symmetry_texture(size=256, symmetry=9, seed=0.81)
+        self.water_specular_tex = self._create_water_specular_texture(size=256, seed=0.41)
         self.floor_wet_shader = self._load_floor_wet_shader()
         self.floor_shader_nodes: list[NodePath] = []
         self.floor_contact_uv = Vec2(0.0, 0.0)
         self.floor_contact_strength = 0.2
         self.floor_contact_decay = 3.6
-        self.floor_uv_projection_scale = 0.03
+        self.floor_uv_projection_scale = 30.0
         self.animate_non_water_uv = True
         self.water_overlay_min_area = 20.5
         self.water_level_offset = 0.0
         self.water_surface_raise = 0.028
+        self.water_uv_repeat_scale =32.0
+        self.water_wave_amplitude = 0.24
+        self.water_wave_speed = 10.4
+        self.water_wave_freq_x = 0.09
+        self.water_wave_freq_y = 0.07
+        self.water_specular_detail_repeat = 7.5
+        self.water_specular_strength = 0.72
+        self.water_specular_scroll_speed = 1.85
+        self.water_color_cycle_enabled = True
+        self.water_color_cycle_speed = 5.8
+        self.water_color_cycle_saturation = 0.92
+        self.water_color_cycle_value = 1.0
+        self.water_color_cycle_alpha = 0.34
+        self.water_color_cycle_smoothness = 0.24
+        self.water_buoyancy_bias = 0.62
+        self.water_buoyancy_strength = 2.2
+        self.water_drag_planar = 0.85
+        self.water_drag_vertical = 1.95
+        self.water_loop_overscan = 6.0
+        self.water_surfaces: list[dict] = []
+        self.water_crystal_spawn_enabled = True
+        self.water_crystal_spawn_interval = 0.42 if self.performance_mode else 0.24
+        self.water_crystal_spawn_timer = 0.0
+        self.water_crystal_max_count = 48 if self.performance_mode else 84
+        self.water_crystal_fall_gravity = 14.5
+        self.water_crystal_spawn_area_scale = 2.1
+        self.water_crystal_spawn_height_min = 8.0
+        self.water_crystal_spawn_height_max = 24.0
+        self.water_crystal_stuck_duration = 0.9
+        self.water_crystal_float_duration = 10.0
+        self.water_crystal_fade_duration = 1.5
+        self.water_crystals: list[dict] = []
         self.swap_floor_and_ceiling = False
         if not self.lazy_vram_loading:
             self._prefetch_texture_assets()
@@ -310,14 +347,14 @@ class SoulSymphony(ShowBase):
             scale=2.4,
             layout_mode="hexmix",
             snake_cell_size=8,
-            snake_layers=4,
+            snake_layers=1,
             maze_cell_size=32,
-            maze_layers=4,
+            maze_layers=1,
             maze_loop_chance=0.15,
             maze_vertical_link_chance=0.13,
             average_room_size=13.0,
             room_size_jitter=0.62,
-            room_height=512.0,
+            room_height=4096.0,
             corridor_width=15.5,
             room_density=0.68,
             corridor_density=0.64,
@@ -475,7 +512,13 @@ class SoulSymphony(ShowBase):
         self.platform_guardrail_thickness = 0.16
         self.platform_mover_ratio = 0.34
         self.platform_loop_range = 18.0
+        self.world_wrap_margin = 0.35
         self.platform_course_spawn_pos = Vec3(self.map_w * 0.5, self.map_d * 0.5, self.floor_y + 3.0)
+        self.enable_inverted_level_echo = True
+        self.inverted_level_echo_plane_z = self.floor_y + 12.0
+        self.inverted_level_echo_extra_offset = 0.0
+        self.inverted_level_echo_opacity = 0.46
+        self.inverted_level_echo_root: NodePath | None = None
         self.arena_platform_points: list[Vec3] = []
         self.infinite_level_mode = bool(self.platform_only_mode)
         self.maze_portal_points: list[Vec3] = []
@@ -498,6 +541,17 @@ class SoulSymphony(ShowBase):
         self.player_ai_combo_step = 0
         self.player_ai_combo_timer = 0.0
         self.player_ai_jump_cooldown = 0.0
+        self.player_ai_plane_height_tolerance = 2.6
+        self.player_ai_below_seek_margin = 0.35
+        self.player_ai_same_existence_w_tolerance = 1.35
+        self.player_ai_engage_distance = 2.35
+        self.player_ai_floor_tolerance = 2.6
+        self.player_ai_lock_target_id: int | None = None
+        self.player_ai_lock_on_distance = 3.2
+        self.player_ai_lock_release_distance = 22.0
+        self.player_ai_move_smooth = 7.8
+        self.player_ai_target_hysteresis = 1.18
+        self.player_ai_last_move_dir = Vec3(0, 1, 0)
         self.w_dimension_distance_scale = 4.0
         self.subtractive_drill_max_radius = 4
 
@@ -554,6 +608,10 @@ class SoulSymphony(ShowBase):
         self.link_brake_drag = 2.6
         self.compression_factor_smoothed = 1.0
         self.compression_smooth_speed = 8.0
+        self.compression_pocket_radius_scale = 2.4
+        self.compression_pocket_influence_power = 0.78
+        self.compression_pocket_dilation_gain = 1.55
+        self.compression_pocket_speed_bias = 0.24
         self.jump_impulse = 24.0
         self.jump_rise_boost = 1.22
         self.jump_float_duration = 0.56
@@ -699,6 +757,31 @@ class SoulSymphony(ShowBase):
         self.kill_protection_root: NodePath | None = None
         self.kill_protection_rings: list[dict] = []
         self.floating_texts: list[dict] = []
+        self.hyperbomb_active = False
+        self.hyperbomb_origin = Vec3(0, 0, 0)
+        self.hyperbomb_timer = 0.0
+        self.hyperbomb_duration = 6.0
+        self.hyperbomb_spawn_duration = 2.2
+        self.hyperbomb_spawn_timer = 0.0
+        self.hyperbomb_spawn_interval_fast = 0.022
+        self.hyperbomb_spawn_interval_slow = 0.16
+        self.hyperbomb_sphere_life = 2.6
+        self.hyperbomb_scale_start_factor = 0.18
+        self.hyperbomb_scale_start = 0.045
+        self.hyperbomb_growth_speed = 18.5
+        self.hyperbomb_growth_slowdown = 4.2
+        self.hyperbomb_max_scale_factor = 4.0
+        self.hyperbomb_max_scale = 64.0
+        self.hyperbomb_damage_radius_factor = 1.05
+        self.hyperbomb_damage_interval = 0.12
+        self.hyperbomb_damage_per_tick = 22.0
+        self.hyperbomb_damage_timer = 0.0
+        self.hyperbomb_alpha_log_k = 9.0
+        self.hyperbomb_alpha_min = 0.12
+        self.hyperbomb_cooldown = 2.0
+        self.hyperbomb_cooldown_duration = 1.75
+        self.hyperbomb_spheres: list[dict] = []
+        self.hyperbomb_audio_nodes: list[dict] = []
         self.health_powerups: list[dict] = []
         self.timespace_tone = None
         self.timespace_tone_target_rate = 1.0
@@ -756,6 +839,7 @@ class SoulSymphony(ShowBase):
         if self.enable_gravity_particles:
             self._setup_room_gravity_particles()
         self._spawn_health_powerups(count=8 if self.performance_mode else 16)
+        self._setup_inverted_level_echo()
 
         self.audio3d = Audio3DManager.Audio3DManager(self.sfxManagerList[0], self.camera)
         self.audio3d.setDistanceFactor(20.0)
@@ -782,6 +866,7 @@ class SoulSymphony(ShowBase):
         self.accept("wheel_up", self._on_mouse_wheel, [1.0])
         self.accept("wheel_down", self._on_mouse_wheel, [-1.0])
         self.accept("mouse1", self._trigger_swing_attack)
+        self.accept("mouse2", self._trigger_hyperbomb)
         self.accept("mouse3", self._trigger_spin_attack)
         self.accept("lshift", self._set_hyperspace_gravity_hold, [True])
         self.accept("lshift-up", self._set_hyperspace_gravity_hold, [False])
@@ -789,6 +874,7 @@ class SoulSymphony(ShowBase):
         self.accept("rshift-up", self._set_hyperspace_gravity_hold, [False])
         self.accept("1", self._toggle_performance_mode)
         self.accept("r", self._restart_after_game_over)
+        self.accept("escape", self._on_escape_pressed)
 
         self.sfx_roll = self._load_first_sfx([
             "qigongbell",
@@ -851,8 +937,16 @@ class SoulSymphony(ShowBase):
             "soundfx/monsterdie",
             "sfx/monsterdie",
         ])
+        self.sfx_attackbomb_path = self._resolve_attackbomb_path()
         self.sfx_monster_hum_path = self._resolve_monster_hum_path()
+        self.sfx_monster_hum_is_idle = bool(
+            self.sfx_monster_hum_path
+            and "monsteridle" in os.path.basename(self.sfx_monster_hum_path).lower()
+        )
         self.hit_cooldown = 0.0
+        self.bgm_track = None
+        self.bgm_track_path = None
+        self.bgm_volume = 0.03
 
         if self.sfx_roll:
             self.audio3d.attachSoundToObject(self.sfx_roll, self.ball_np)
@@ -876,6 +970,8 @@ class SoulSymphony(ShowBase):
         if self.sfx_roll:
             self.sfx_roll.setLoop(True)
             self.sfx_roll.setVolume(0.0)
+
+        self._start_random_bgm_loop()
 
         self._setup_timespace_tone()
 
@@ -943,6 +1039,10 @@ class SoulSymphony(ShowBase):
         print(f"Scene visuals: {len(self.scene_visuals)}")
         print(f"Monster count: {len(self.monsters)}")
         print(f"Room count: {len(self.rooms)}")
+        print(f"Compression pockets: {len(self.room_compression_pockets)} | dimensional compression: {self.enable_dimensional_compression}")
+        if hasattr(self, "ball_np") and self.ball_np is not None and not self.ball_np.isEmpty():
+            sample_cf = self._compression_factor_at(self.ball_np.getPos(), self.roll_time)
+            print(f"Compression factor at spawn: {sample_cf:.3f}")
         print(f"Texture cache entries: {len(self.texture_cache)}")
         mode_counts: dict[str, int] = {}
         for entry in self.dynamic_room_uv_nodes:
@@ -978,6 +1078,23 @@ class SoulSymphony(ShowBase):
                 return path
         return None
 
+    def _resolve_attackbomb_path(self) -> str | None:
+        candidates = [
+            "attackbomb.wav",
+            "soundfx/attackbomb.wav",
+            "sfx/attackbomb.wav",
+            "attackbomb.ogg",
+            "soundfx/attackbomb.ogg",
+            "sfx/attackbomb.ogg",
+            "attackbomb.mp3",
+            "soundfx/attackbomb.mp3",
+            "sfx/attackbomb.mp3",
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        return None
+
     def _distance4d_sq(self, pos_a: Vec3, w_a: float, pos_b: Vec3, w_b: float) -> float:
         d3_sq = (Vec3(pos_b) - Vec3(pos_a)).lengthSquared()
         w_scale = max(0.1, float(getattr(self, "w_dimension_distance_scale", 4.0)))
@@ -1003,8 +1120,12 @@ class SoulSymphony(ShowBase):
             if not hum:
                 continue
             self.audio3d.attachSoundToObject(hum, root)
-            self.audio3d.setSoundMinDistance(hum, 2.6)
-            self.audio3d.setSoundMaxDistance(hum, 52.0)
+            if bool(getattr(self, "sfx_monster_hum_is_idle", False)):
+                self.audio3d.setSoundMinDistance(hum, 12.0)
+                self.audio3d.setSoundMaxDistance(hum, 240.0)
+            else:
+                self.audio3d.setSoundMinDistance(hum, 2.6)
+                self.audio3d.setSoundMaxDistance(hum, 52.0)
             if hasattr(self.audio3d, "setSoundVelocityAuto"):
                 self.audio3d.setSoundVelocityAuto(hum)
             hum.setLoop(True)
@@ -1026,7 +1147,8 @@ class SoulSymphony(ShowBase):
         player_w = float(getattr(self, "player_w", 0.0))
         monster_w = float(monster.get("w", 0.0))
         dist = self._distance4d(root.getPos(), monster_w, ball_pos, player_w)
-        max_dist = 44.0
+        use_idle_hum = bool(getattr(self, "sfx_monster_hum_is_idle", False))
+        max_dist = 220.0 if use_idle_hum else 44.0
         if dist >= max_dist or root.isStashed():
             if monster.get("hum_active", False):
                 hum.stop()
@@ -1034,13 +1156,17 @@ class SoulSymphony(ShowBase):
             return
 
         strength = 1.0 - (dist / max_dist)
-        target_vol = 0.02 + 0.12 * strength
+        strength = max(0.0, min(1.0, strength))
+        if use_idle_hum:
+            target_vol = 0.095 + 0.46 * (strength ** 1.0)
+        else:
+            target_vol = 0.02 + 0.12 * strength
         mix = max(0.0, min(1.0, float(getattr(self, "audio_hyper_mix", 0.0))))
         target_vol = target_vol * (1.0 - 0.3 * mix) + 0.04 * mix
         if not monster.get("hum_active", False):
             hum.play()
             monster["hum_active"] = True
-        hum.setVolume(max(0.0, min(0.2, target_vol)))
+        hum.setVolume(max(0.0, min(0.58 if use_idle_hum else 0.2, target_vol)))
         base_rate = 0.9 + 0.06 * math.sin(self.roll_time * 1.9 + monster.get("phase", 0.0))
         hum.setPlayRate(base_rate * (1.0 - 0.28 * mix) + 1.0 * (0.28 * mix))
 
@@ -1083,7 +1209,7 @@ class SoulSymphony(ShowBase):
             self.camera_smoothed_pos = Vec3(self.camera.getPos(self.render))
         if hasattr(self, "fog") and self.fog is not None:
             self.fog.setColor(0.035, 0.045, 0.075)
-            self.fog.setLinearRange(6, 105)
+            self.fog.setLinearRange(6, 40)
         if hasattr(self, "ball_np"):
             ball_pos = self.ball_np.getPos()
             self.camera.setPos(self._clamp_camera_to_current_room_bounds(self.camera.getPos(), ball_pos))
@@ -1220,10 +1346,27 @@ class SoulSymphony(ShowBase):
                 return
 
         speed_norm = min(1.0, speed / max(0.001, self.max_ball_speed))
-        swim_speed = 0.4 + 0.95 * speed_norm
-        pulse = 0.92 + 0.4 * (0.5 + 0.5 * math.sin(self.roll_time * 3.7))
-        strength = self.video_distort_strength * (1.05 + 0.95 * speed_norm) * pulse
-        bloom_strength = self.video_bloom_strength * (0.8 + speed_norm * 0.9)
+        local_cf = float(getattr(self, "compression_factor_smoothed", 1.0))
+        compression_intensity = self._clamp((1.0 - local_cf) / 0.92, 0.0, 1.0)
+        dilation_intensity = self._clamp((local_cf - 1.0) / 0.9, 0.0, 1.0)
+        timespace_intensity = max(compression_intensity, dilation_intensity * 0.42)
+
+        tone_rate = self._clamp(float(getattr(self, "timespace_tone_current_rate", 1.0)), 0.28, 3.4)
+        sine_cycle = 0.5 + 0.5 * math.sin(self.roll_time * (2.2 + tone_rate * 2.9))
+        sine_signed = (sine_cycle * 2.0) - 1.0
+
+        base_mul = 1.0 + timespace_intensity * float(getattr(self, "video_distort_compression_response", 1.25))
+        sine_mul = 1.0 + sine_signed * timespace_intensity * float(getattr(self, "video_distort_sine_response", 0.52))
+        dynamic_mul = self._clamp(
+            base_mul * sine_mul,
+            float(getattr(self, "video_distort_dynamic_min_mul", 0.62)),
+            float(getattr(self, "video_distort_dynamic_max_mul", 2.75)),
+        )
+
+        swim_speed = (0.4 + 0.95 * speed_norm) * (1.0 + 0.36 * timespace_intensity) * (0.92 + 0.24 * sine_cycle)
+        pulse = 0.92 + 0.4 * (0.5 + 0.5 * math.sin(self.roll_time * (3.7 + tone_rate * 0.8)))
+        strength = self.video_distort_strength * (1.05 + 0.95 * speed_norm) * pulse * dynamic_mul
+        bloom_strength = self.video_bloom_strength * (0.8 + speed_norm * 0.9) * (0.86 + 0.44 * timespace_intensity)
         tex_w, tex_h = getattr(self, "video_distort_tex_size", (0, 0))
         if tex_w <= 0 or tex_h <= 0:
             tex_w = int(max(1, self.win.getXSize()))
@@ -1447,20 +1590,41 @@ class SoulSymphony(ShowBase):
         if not self.rooms:
             return
 
+        arena_mode = bool(getattr(self, "four_d_obstacle_arena_mode", False))
+
         for room_idx, room in enumerate(self.rooms):
             room_level = self.room_levels.get(room_idx, 0)
             base_z = self._level_base_z(room_level)
-            pocket_count = random.choice([2, 2, 3])
+            if arena_mode:
+                pocket_count = random.choice([3, 4, 4])
+            else:
+                pocket_count = random.choice([2, 2, 3])
             for _ in range(pocket_count):
                 cx = random.uniform(room.x + room.w * 0.18, room.x + room.w * 0.82)
                 cy = random.uniform(room.y + room.h * 0.18, room.y + room.h * 0.82)
-                cz = base_z + random.uniform(self.wall_h * 0.35, self.wall_h * 0.72)
-                radius = random.uniform(max(2.4, min(room.w, room.h) * 0.16), max(4.8, min(room.w, room.h) * 0.38))
-                compression = random.uniform(0.52, 0.92)
-                dilation = random.uniform(0.08, 0.44)
-                scale_x = random.uniform(0.58, 1.7)
-                scale_y = random.uniform(0.58, 1.7)
-                scale_z = random.uniform(0.58, 1.7)
+                if arena_mode:
+                    z_low = self.floor_y + 2.0
+                    z_high = self.floor_y + 15.5
+                    cz = random.uniform(z_low, z_high)
+                    radius = random.uniform(max(6.2, min(room.w, room.h) * 0.24), max(11.5, min(room.w, room.h) * 0.52))
+                    compression = random.uniform(0.36, 0.82)
+                    dilation = random.uniform(0.18, 0.58)
+                    scale_x = random.uniform(0.74, 1.95)
+                    scale_y = random.uniform(0.74, 1.95)
+                    scale_z = random.uniform(0.48, 1.22)
+                else:
+                    cz = base_z + random.uniform(self.wall_h * 0.35, self.wall_h * 0.72)
+                    radius = random.uniform(max(2.4, min(room.w, room.h) * 0.16), max(4.8, min(room.w, room.h) * 0.38))
+                    compression = random.uniform(0.52, 0.92)
+                    dilation = random.uniform(0.08, 0.44)
+                    scale_x = random.uniform(0.58, 1.7)
+                    scale_y = random.uniform(0.58, 1.7)
+                    scale_z = random.uniform(0.58, 1.7)
+
+                radius_scale = max(0.5, float(getattr(self, "compression_pocket_radius_scale", 2.4)))
+                if arena_mode:
+                    radius_scale *= 1.18
+                radius *= radius_scale
                 self.room_compression_pockets.append(
                     {
                         "room_idx": room_idx,
@@ -1662,15 +1826,19 @@ class SoulSymphony(ShowBase):
                 continue
 
             influence = 1.0 - dist
-            influence = influence ** 1.4
+            influence_power = max(0.25, float(getattr(self, "compression_pocket_influence_power", 0.78)))
+            influence = influence ** influence_power
             local_factor = 1.0 - (1.0 - pocket["compression"]) * influence
-            local_factor += pocket.get("dilation", 0.0) * influence * math.sin(t * 1.35 + phase * 1.7)
-            factor *= max(0.55, min(1.55, local_factor))
+            dilation_gain = max(0.0, float(getattr(self, "compression_pocket_dilation_gain", 1.55)))
+            speed_bias = self._clamp(float(getattr(self, "compression_pocket_speed_bias", 0.24)), 0.0, 0.95)
+            sin_norm = 0.5 + 0.5 * math.sin(t * 1.35 + phase * 1.7)
+            local_factor += pocket.get("dilation", 0.0) * dilation_gain * influence * (speed_bias + (1.0 - speed_bias) * sin_norm)
+            factor *= max(0.55, min(1.85, local_factor))
 
         if hasattr(self, "ball_body"):
             speed = self.ball_body.getLinearVelocity().length()
             speed_norm = min(1.0, speed / max(0.001, self.max_ball_speed))
-            travel_dilation = 1.0 + speed_norm * 0.08
+            travel_dilation = 1.0 + speed_norm * 0.12
             factor *= travel_dilation
 
         return max(0.42, min(1.9, factor))
@@ -1813,6 +1981,17 @@ class SoulSymphony(ShowBase):
         base_z = self._level_base_z(self.room_levels.get(room_idx, 0))
         return Vec3(room.x + room.w * 0.5, room.y + room.h * 0.5, base_z + 0.55)
 
+    def _floor_anchor_z_for_pos(self, pos: Vec3) -> float:
+        if bool(getattr(self, "four_d_obstacle_arena_mode", False)):
+            return float(self.floor_y + float(getattr(self, "water_surface_raise", 0.0)))
+
+        room_idx = self._get_current_room_idx_for_pos(pos)
+        if room_idx is None:
+            return float(self.floor_y + float(getattr(self, "ball_radius", 0.68)) + 0.06)
+
+        base_z = self._level_base_z(self.room_levels.get(room_idx, 0))
+        return float(base_z + float(getattr(self, "ball_radius", 0.68)) + 0.06)
+
     def _find_room_path(self, start_idx: int, goal_idx: int) -> list[int]:
         if start_idx == goal_idx:
             return [start_idx]
@@ -1861,26 +2040,128 @@ class SoulSymphony(ShowBase):
         if not alive:
             return None
         self.player_ai_retarget_timer -= 1.0 / 30.0
-        current = None
-        if self.player_ai_target_id is not None:
+        player_w = float(getattr(self, "player_w", 0.0))
+        plane_tol = max(0.15, float(getattr(self, "player_ai_plane_height_tolerance", 2.6)))
+        below_margin = float(getattr(self, "player_ai_below_seek_margin", 0.35))
+        w_plane_tol = max(0.05, float(getattr(self, "player_ai_same_existence_w_tolerance", 1.35)))
+        engage_dist = max(0.5, float(getattr(self, "player_ai_engage_distance", 2.35)))
+        floor_tol = max(0.25, float(getattr(self, "player_ai_floor_tolerance", 2.6)))
+        lock_release_dist = max(engage_dist + 1.0, float(getattr(self, "player_ai_lock_release_distance", 22.0)))
+        ball_floor_z = self._floor_anchor_z_for_pos(ball_pos)
+
+        def _has_fold_route(monster_pos: Vec3, monster_w: float) -> bool:
+            if not self.liminal_fold_nodes:
+                return False
+            start_fold = self._nearest_liminal_fold_idx(ball_pos, player_w)
+            goal_fold = self._nearest_liminal_fold_idx(monster_pos, monster_w)
+            if start_fold is None or goal_fold is None:
+                return False
+            next_hop = self._next_liminal_fold_hop(start_fold, goal_fold)
+            return isinstance(next_hop, int)
+
+        def _monster_metrics(monster: dict) -> tuple[float, float, float, float, float]:
+            root = monster.get("root")
+            if root is None or root.isEmpty():
+                return float("inf"), 0.0, float("inf"), float("inf"), float("inf")
+            m_pos = root.getPos()
+            m_w = float(monster.get("w", 0.0))
+            dz = float(m_pos.z) - float(ball_pos.z)
+            dw = abs(m_w - player_w)
+            dist4d = self._distance4d(ball_pos, player_w, m_pos, m_w)
+            floor_delta = abs(self._floor_anchor_z_for_pos(m_pos) - ball_floor_z)
+            return dist4d, dz, dw, m_w, floor_delta
+
+        def _find_by_id(target_id: int | None) -> dict | None:
+            if target_id is None:
+                return None
             for monster in alive:
                 root = monster.get("root")
-                if root is not None and id(root) == self.player_ai_target_id:
-                    current = monster
-                    break
-        if current is not None and self.player_ai_retarget_timer > 0.0:
-            return current
+                if root is not None and id(root) == target_id:
+                    return monster
+            return None
 
-        player_w = float(getattr(self, "player_w", 0.0))
-        best = min(
-            alive,
-            key=lambda m: self._distance4d_sq(
-                ball_pos,
-                player_w,
-                m.get("root").getPos(),
-                float(m.get("w", 0.0)),
-            ),
-        )
+        locked = _find_by_id(getattr(self, "player_ai_lock_target_id", None))
+        if locked is not None:
+            locked_dist4d, locked_dz, _, _, locked_floor_delta = _monster_metrics(locked)
+            locked_engaging = locked_dist4d <= engage_dist
+            locked_below = locked_dz < -below_margin
+            locked_allowed = (not locked_below) or locked_engaging
+            if locked_dist4d <= lock_release_dist and locked_floor_delta <= floor_tol * 2.4 and locked_allowed:
+                root = locked.get("root")
+                self.player_ai_target_id = id(root) if root is not None else None
+                self.player_ai_retarget_timer = max(self.player_ai_retarget_timer, 0.18)
+                return locked
+            self.player_ai_lock_target_id = None
+
+        current = _find_by_id(self.player_ai_target_id)
+
+        if current is not None and self.player_ai_retarget_timer > 0.0:
+            current_dist4d, current_dz, _, _, current_floor_delta = _monster_metrics(current)
+            current_engaging = current_dist4d <= engage_dist
+            current_below = current_dz < -below_margin
+            if ((not current_below) and current_floor_delta <= floor_tol * 1.35) or current_engaging:
+                return current
+
+        candidates: list[dict] = []
+        candidates_same_plane: list[dict] = []
+        candidates_same_floor: list[dict] = []
+        candidates_same_floor_plane: list[dict] = []
+        candidates_same_plane_same_w: list[dict] = []
+        candidates_same_floor_plane_same_w: list[dict] = []
+        for monster in alive:
+            dist4d, dz, dw, m_w, floor_delta = _monster_metrics(monster)
+            root = monster.get("root")
+            if root is None or root.isEmpty():
+                continue
+            m_pos = root.getPos()
+            engaging = dist4d <= engage_dist
+            if dz < -below_margin and not engaging:
+                continue
+            if floor_delta > floor_tol * 1.45 and not engaging:
+                continue
+            if dw > w_plane_tol * 1.7 and not engaging:
+                if not _has_fold_route(m_pos, m_w):
+                    continue
+            candidates.append(monster)
+            same_floor = floor_delta <= floor_tol
+            if same_floor:
+                candidates_same_floor.append(monster)
+            if abs(dz) <= plane_tol:
+                candidates_same_plane.append(monster)
+                if same_floor:
+                    candidates_same_floor_plane.append(monster)
+                if dw <= w_plane_tol:
+                    candidates_same_plane_same_w.append(monster)
+                    if same_floor:
+                        candidates_same_floor_plane_same_w.append(monster)
+
+        if candidates_same_floor_plane_same_w:
+            pool = candidates_same_floor_plane_same_w
+        elif candidates_same_floor_plane:
+            pool = candidates_same_floor_plane
+        elif candidates_same_floor:
+            pool = candidates_same_floor
+        elif candidates_same_plane_same_w:
+            pool = candidates_same_plane_same_w
+        elif candidates_same_plane:
+            pool = candidates_same_plane
+        else:
+            pool = candidates
+
+        if not pool:
+            return None
+
+        def _score(monster: dict) -> float:
+            dist4d, dz, dw, _, floor_delta = _monster_metrics(monster)
+            return dist4d + abs(dz) * 0.4 + dw * 0.35 + floor_delta * 0.95
+
+        best = min(pool, key=_score)
+        if current is not None and current in pool:
+            best_score = _score(best)
+            current_score = _score(current)
+            hysteresis = max(1.01, float(getattr(self, "player_ai_target_hysteresis", 1.18)))
+            if current_score <= best_score * hysteresis:
+                best = current
         best_root = best.get("root")
         self.player_ai_target_id = id(best_root) if best_root is not None else None
         self.player_ai_retarget_timer = random.uniform(0.4, 1.1)
@@ -1911,6 +2192,9 @@ class SoulSymphony(ShowBase):
         target_w = float(target.get("w", 0.0))
         player_w = float(getattr(self, "player_w", 0.0))
         self.player_ai_target_w = target_w
+        engage_dist = max(0.5, float(getattr(self, "player_ai_engage_distance", 2.35)))
+        lock_on_dist = max(engage_dist, float(getattr(self, "player_ai_lock_on_distance", 3.2)))
+        lock_release_dist = max(lock_on_dist + 0.5, float(getattr(self, "player_ai_lock_release_distance", 22.0)))
 
         start_room = self._get_current_room_idx_for_pos(ball_pos)
         goal_room = self._get_current_room_idx_for_pos(target_pos)
@@ -1933,8 +2217,23 @@ class SoulSymphony(ShowBase):
         if move_vec.lengthSquared() <= 1e-6:
             return None
         move_vec.normalize()
+        prev_move = Vec3(getattr(self, "player_ai_last_move_dir", Vec3(0, 1, 0)))
+        if prev_move.lengthSquared() > 1e-8:
+            prev_move.normalize()
+            smooth_speed = max(0.1, float(getattr(self, "player_ai_move_smooth", 7.8)))
+            blend = min(1.0, dt * smooth_speed)
+            smoothed = prev_move + (move_vec - prev_move) * blend
+            if smoothed.lengthSquared() > 1e-8:
+                smoothed.normalize()
+                move_vec = smoothed
+        self.player_ai_last_move_dir = Vec3(move_vec)
 
         target_dist_4d = self._distance4d(ball_pos, player_w, target_pos, target_w)
+        target_root_id = id(target_root)
+        if target_dist_4d <= lock_on_dist:
+            self.player_ai_lock_target_id = target_root_id
+        elif getattr(self, "player_ai_lock_target_id", None) == target_root_id and target_dist_4d > lock_release_dist:
+            self.player_ai_lock_target_id = None
 
         if self.grounded and self.player_ai_jump_cooldown <= 0.0:
             need_jump = (target_pos.z - ball_pos.z) > max(0.55, self.ball_radius * 0.8)
@@ -2118,10 +2417,60 @@ class SoulSymphony(ShowBase):
                     return sfx
         return None
 
+    def _collect_bgm_tracks(self) -> list[str]:
+        bgm_dir = "bgm"
+        if not os.path.isdir(bgm_dir):
+            return []
+        exts = {".ogg", ".mp3", ".wav", ".flac", ".m4a"}
+        tracks: list[str] = []
+        for root, _dirs, files in os.walk(bgm_dir):
+            for name in files:
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in exts:
+                    continue
+                full = os.path.join(root, name)
+                tracks.append(full.replace("\\", "/"))
+        return tracks
+
+    def _start_random_bgm_loop(self) -> None:
+        tracks = self._collect_bgm_tracks()
+        if not tracks:
+            self.bgm_track = None
+            self.bgm_track_path = None
+            return
+        random.shuffle(tracks)
+        for path in tracks:
+            try:
+                music = self.loader.loadMusic(path)
+            except Exception:
+                music = None
+            if not music:
+                continue
+            try:
+                music.setLoop(True)
+                music.setVolume(max(0.0, min(1.0, float(getattr(self, "bgm_volume", 0.48)))))
+                music.play()
+                self.bgm_track = music
+                self.bgm_track_path = path
+                return
+            except Exception:
+                continue
+        self.bgm_track = None
+        self.bgm_track_path = None
+
     def _queue_jump(self) -> None:
         if self.game_over_active:
             return
         queue_jump(self)
+
+    def _on_escape_pressed(self) -> None:
+        try:
+            self.userExit()
+        except Exception:
+            try:
+                self.destroy()
+            except Exception:
+                pass
 
     def _on_mouse_wheel(self, direction: float) -> None:
         step = float(getattr(self, "scroll_lift_step", 0.45))
@@ -2326,6 +2675,40 @@ class SoulSymphony(ShowBase):
         tex.setAnisotropicDegree(1 if self.performance_mode else 2)
         return tex
 
+    def _create_water_specular_texture(self, size: int = 256, seed: float = 0.0) -> Texture:
+        img = PNMImage(size, size, 4)
+        inv = 1.0 / max(1.0, float(size - 1))
+        phase = float(seed) * math.tau
+
+        for y in range(size):
+            v = y * inv
+            for x in range(size):
+                u = x * inv
+
+                n0 = 0.5 + 0.5 * math.sin((u * 78.0 + v * 61.0 + phase) * math.tau)
+                n1 = 0.5 + 0.5 * math.sin((u * 143.0 - v * 117.0 + phase * 1.73) * math.tau)
+                n2 = 0.5 + 0.5 * math.sin(((u + v) * 221.0 + phase * 2.41) * math.tau)
+                sparkle = (n0 * 0.45 + n1 * 0.35 + n2 * 0.2)
+
+                tight = max(0.0, (sparkle - 0.58) / 0.42)
+                bright = tight ** 4.2
+                medium = tight ** 2.1
+                alpha = max(bright, medium * 0.36)
+
+                r = min(1.0, 0.72 + bright * 0.36)
+                g = min(1.0, 0.82 + bright * 0.28)
+                b = min(1.0, 0.96 + bright * 0.18)
+                img.setXelA(x, y, r, g, b, min(1.0, alpha))
+
+        tex = Texture(f"water-spec-{int(seed * 1000)}")
+        tex.load(img)
+        tex.setWrapU(Texture.WMRepeat)
+        tex.setWrapV(Texture.WMRepeat)
+        tex.setMinfilter(Texture.FTLinearMipmapLinear)
+        tex.setMagfilter(Texture.FTLinear)
+        tex.setAnisotropicDegree(1 if self.performance_mode else 2)
+        return tex
+
     def _get_quad_template(self, name: str, frame: tuple[float, float, float, float]) -> NodePath:
         left, right, bottom, top = frame
         key = (name, left, right, bottom, top)
@@ -2469,6 +2852,7 @@ class SoulSymphony(ShowBase):
         keep: list[dict] = []
         ball_pos = self.ball_np.getPos() if hasattr(self, "ball_np") else None
         water_radius_sq = float(getattr(self, "water_uv_active_radius", 110.0)) ** 2
+        disable_arena_water_radius_cull = bool(getattr(self, "four_d_obstacle_arena_mode", False))
         for entry in self.dynamic_room_uv_nodes:
             node = entry["node"]
             if node is None or node.isEmpty():
@@ -2518,7 +2902,7 @@ class SoulSymphony(ShowBase):
                 v = (base_v - t * speed * 0.09 + persp_v * 0.09 * (1.0 - persp_mix)) % 1.0
             else:
                 is_water = mode == "water"
-                if is_water and ball_pos is not None:
+                if is_water and ball_pos is not None and not disable_arena_water_radius_cull:
                     center = entry.get("center")
                     if center is not None:
                         dx = float(center.x) - float(ball_pos.x)
@@ -2580,6 +2964,35 @@ class SoulSymphony(ShowBase):
                 cycle_scale = 0.9 + 1.4 * cycle_wave
                 if is_water:
                     cycle_scale = 1.1 + 1.85 * cycle_wave
+                    if bool(getattr(self, "water_color_cycle_enabled", True)):
+                        hue_speed = float(getattr(self, "water_color_cycle_speed", 5.8))
+                        sat = self._clamp(float(getattr(self, "water_color_cycle_saturation", 0.92)), 0.0, 1.0)
+                        val = self._clamp(float(getattr(self, "water_color_cycle_value", 1.0)), 0.0, 1.0)
+                        alpha_base = self._clamp(float(getattr(self, "water_color_cycle_alpha", 0.34)), 0.0, 1.0)
+                        smoothness = self._clamp(float(getattr(self, "water_color_cycle_smoothness", 0.24)), 0.0, 1.0)
+                        hue = (t * hue_speed * 0.11 + phase * 0.17 + (center.x + center.y) * 0.0021) % 1.0
+                        wr, wg, wb = colorsys.hsv_to_rgb(hue, sat, val)
+                        pulse = 0.78 + 0.22 * cycle_wave
+                        target_col = (
+                            0.16 + wr * 0.84 * pulse,
+                            0.16 + wg * 0.84 * pulse,
+                            0.16 + wb * 0.84 * pulse,
+                            alpha_base,
+                        )
+                        prev_col = entry.get("water_cycle_col")
+                        if not isinstance(prev_col, tuple) or len(prev_col) != 4:
+                            smoothed_col = target_col
+                        else:
+                            smoothed_col = (
+                                prev_col[0] + (target_col[0] - prev_col[0]) * smoothness,
+                                prev_col[1] + (target_col[1] - prev_col[1]) * smoothness,
+                                prev_col[2] + (target_col[2] - prev_col[2]) * smoothness,
+                                prev_col[3] + (target_col[3] - prev_col[3]) * smoothness,
+                            )
+                        entry["water_cycle_col"] = smoothed_col
+                        node.setColor(smoothed_col)
+                    else:
+                        node.setColor(0.46, 0.72, 0.92, 0.34)
 
                 layer_a = entry.get("layer_a")
                 layer_b = entry.get("layer_b")
@@ -2601,10 +3014,42 @@ class SoulSymphony(ShowBase):
                     gain = float(getattr(self, "texture_layer_additive_gain", 0.42))
                     layer_b.setColor((gain, gain, gain, max(min_b, min(max_b, (1.0 - pulse_strength) * 0.34 + pulse_strength * 0.24))))
                 if layer_c is not None:
-                    node.setTexScale(layer_c, max(0.02, base_ru * cycle_scale), max(0.02, base_rv * cycle_scale))
-                    node.setTexOffset(layer_c, (base_u + cycle_phase * 0.31) % 1.0, (base_v + cycle_phase * 0.27) % 1.0)
+                    if is_water:
+                        spec_repeat = max(1.0, float(entry.get("water_spec_repeat", getattr(self, "water_specular_detail_repeat", 7.5))))
+                        spec_speed = max(0.1, float(entry.get("water_spec_speed", getattr(self, "water_specular_scroll_speed", 1.85))))
+                        spec_scale = 0.75 + 1.1 * cycle_wave
+                        node.setTexScale(layer_c, max(0.02, base_ru * spec_repeat * spec_scale), max(0.02, base_rv * spec_repeat * spec_scale))
+                        node.setTexOffset(
+                            layer_c,
+                            (base_u + cycle_phase * (0.42 + spec_speed * 0.12) + t * spec_speed * 0.09) % 1.0,
+                            (base_v + cycle_phase * (0.38 + spec_speed * 0.1) - t * spec_speed * 0.07) % 1.0,
+                        )
+                    else:
+                        node.setTexScale(layer_c, max(0.02, base_ru * cycle_scale), max(0.02, base_rv * cycle_scale))
+                        node.setTexOffset(layer_c, (base_u + cycle_phase * 0.31) % 1.0, (base_v + cycle_phase * 0.27) % 1.0)
                     gain = float(getattr(self, "texture_layer_additive_gain", 0.42))
-                    layer_c.setColor((gain, gain, gain, max(0.0, min(1.0, cycle_alpha))))
+                    if is_water and bool(getattr(self, "water_color_cycle_enabled", True)):
+                        smoothness = self._clamp(float(getattr(self, "water_color_cycle_smoothness", 0.24)), 0.0, 1.0)
+                        spec_target = (
+                            gain * (0.52 + wr * 0.95),
+                            gain * (0.52 + wg * 0.95),
+                            gain * (0.52 + wb * 0.95),
+                            max(0.0, min(1.0, cycle_alpha)),
+                        )
+                        prev_spec = entry.get("water_spec_cycle_col")
+                        if not isinstance(prev_spec, tuple) or len(prev_spec) != 4:
+                            spec_col = spec_target
+                        else:
+                            spec_col = (
+                                prev_spec[0] + (spec_target[0] - prev_spec[0]) * smoothness,
+                                prev_spec[1] + (spec_target[1] - prev_spec[1]) * smoothness,
+                                prev_spec[2] + (spec_target[2] - prev_spec[2]) * smoothness,
+                                prev_spec[3] + (spec_target[3] - prev_spec[3]) * smoothness,
+                            )
+                        entry["water_spec_cycle_col"] = spec_col
+                        layer_c.setColor(spec_col)
+                    else:
+                        layer_c.setColor((gain, gain, gain, max(0.0, min(1.0, cycle_alpha))))
 
             if mode in ("wall", "ceiling"):
                 distort = float(getattr(self, "cube_water_distort_strength", 0.085))
@@ -2620,6 +3065,95 @@ class SoulSymphony(ShowBase):
             node.setTexOffset(stage, u, v)
             keep.append(entry)
         self.dynamic_room_uv_nodes = keep
+
+    def _register_water_surface(self, node: NodePath | None, x0: float, x1: float, y0: float, y1: float, z: float) -> None:
+        if node is None or node.isEmpty():
+            return
+        amp = float(getattr(self, "water_wave_amplitude", 0.2))
+        speed = float(getattr(self, "water_wave_speed", 1.4))
+        fx = float(getattr(self, "water_wave_freq_x", 0.09))
+        fy = float(getattr(self, "water_wave_freq_y", 0.07))
+        self.water_surfaces.append(
+            {
+                "node": node,
+                "x0": float(min(x0, x1)),
+                "x1": float(max(x0, x1)),
+                "y0": float(min(y0, y1)),
+                "y1": float(max(y0, y1)),
+                "base_z": float(z),
+                "amp": amp,
+                "speed": speed,
+                "fx": fx,
+                "fy": fy,
+                "phase": random.uniform(0.0, math.tau),
+            }
+        )
+
+    def _sample_water_height(self, pos: Vec3, t: float) -> float | None:
+        best_h: float | None = None
+        for entry in self.water_surfaces:
+            if pos.x < entry["x0"] or pos.x > entry["x1"] or pos.y < entry["y0"] or pos.y > entry["y1"]:
+                continue
+            phase = pos.x * entry["fx"] + pos.y * entry["fy"] + t * entry["speed"] + entry["phase"]
+            wave = math.sin(phase) * entry["amp"] + math.cos(phase * 0.63 + 0.7) * (entry["amp"] * 0.52)
+            h = entry["base_z"] + wave
+            if best_h is None or h > best_h:
+                best_h = h
+        return best_h
+
+    def _update_water_surface_waves(self, t: float) -> None:
+        keep: list[dict] = []
+        for entry in self.water_surfaces:
+            node = entry["node"]
+            if node is None or node.isEmpty():
+                continue
+            cx = (entry["x0"] + entry["x1"]) * 0.5
+            cy = (entry["y0"] + entry["y1"]) * 0.5
+            phase = cx * entry["fx"] + cy * entry["fy"] + t * entry["speed"] + entry["phase"]
+            wave = math.sin(phase) * entry["amp"] + math.cos(phase * 0.63 + 0.7) * (entry["amp"] * 0.52)
+            node.setZ(entry["base_z"] + wave)
+            keep.append(entry)
+        self.water_surfaces = keep
+
+    def _apply_water_buoyancy(self, dt: float) -> None:
+        if not getattr(self, "four_d_obstacle_arena_mode", False):
+            return
+        if not self.water_surfaces:
+            return
+        ball_pos = self.ball_np.getPos()
+        water_h = self._sample_water_height(ball_pos, self.roll_time)
+        if water_h is None:
+            return
+
+        bottom_z = float(ball_pos.z) - float(self.ball_radius)
+        depth = float(water_h) - bottom_z
+        if depth <= 0.0:
+            return
+
+        up = self._get_gravity_up()
+        if up.lengthSquared() < 1e-8:
+            up = Vec3(0, 0, 1)
+        else:
+            up.normalize()
+
+        try:
+            mass = max(0.25, float(self.ball_body.getMass()))
+        except Exception:
+            mass = 1.0
+        g_mag = max(0.1, float(self.current_gravity.length()))
+        submerge = self._clamp(depth / max(0.05, self.ball_radius * 1.9), 0.0, 1.35)
+        buoy_bias = float(getattr(self, "water_buoyancy_bias", 0.62))
+        buoy_force = up * (mass * g_mag * (buoy_bias + submerge * float(getattr(self, "water_buoyancy_strength", 2.2))))
+        self.ball_body.applyCentralForce(buoy_force)
+
+        vel = self.ball_body.getLinearVelocity()
+        v_up = vel.dot(up)
+        v_planar = Vec3(vel) - up * v_up
+        planar_drag = max(0.0, 1.0 - dt * float(getattr(self, "water_drag_planar", 0.85)) * (0.3 + submerge * 0.7))
+        vertical_drag = max(0.0, 1.0 - dt * float(getattr(self, "water_drag_vertical", 1.95)) * (0.4 + submerge * 0.9))
+        v_planar *= planar_drag
+        v_up *= vertical_drag
+        self.ball_body.setLinearVelocity(v_planar + up * v_up)
 
     def _apply_smart_room_uv(self, node: NodePath, pos: Vec3, scale: Vec3, surface_mode: str | None = None) -> None:
         if node is None or node.isEmpty():
@@ -2665,6 +3199,7 @@ class SoulSymphony(ShowBase):
         stage = TextureStage.getDefault()
 
         if bool(getattr(self, "force_single_opaque_additive_texture", False)):
+            layer_c = None
             if forced_mode == "water":
                 stage = TextureStage.getDefault()
             else:
@@ -2688,7 +3223,7 @@ class SoulSymphony(ShowBase):
                 node.setTexture(stage, self.level_checker_tex, 1)
             cube_repeat = max(0.08, min(0.62, (u_repeat + v_repeat) * 0.06))
             if forced_mode == "water":
-                cube_repeat *= 10.0
+                cube_repeat *= float(getattr(self, "water_uv_repeat_scale", 3.2))
             node.setTexScale(stage, cube_repeat, cube_repeat, cube_repeat)
             node.setTexOffset(stage, off_u, off_v)
 
@@ -2698,7 +3233,41 @@ class SoulSymphony(ShowBase):
                 node.setDepthWrite(False)
                 node.setBin("transparent", 33)
 
-            if self.animate_non_water_uv and forced_mode != "water":
+                layer_c = TextureStage(f"water-spec-c-{len(self.dynamic_room_uv_nodes)}")
+                layer_c.setMode(TextureStage.MAdd)
+                layer_c.setSort(42)
+                node.setTexture(layer_c, self.water_specular_tex, 42)
+                try:
+                    node.setTexGen(layer_c, TexGenAttrib.MWorldPosition)
+                except Exception:
+                    pass
+                gain = float(getattr(self, "texture_layer_additive_gain", 0.42))
+                spec_strength = self._clamp(float(getattr(self, "water_specular_strength", 0.72)), 0.0, 1.0)
+                layer_c.setColor((gain, gain, gain, 0.16 + spec_strength * 0.26))
+
+            if forced_mode == "water":
+                self.dynamic_room_uv_nodes.append(
+                    {
+                        "node": node,
+                        "stage": stage,
+                        "mode": "water",
+                        "base_u": off_u,
+                        "base_v": off_v,
+                        "base_ru": cube_repeat,
+                        "base_rv": cube_repeat,
+                        "center": Vec3(pos),
+                        "speed": random.uniform(0.38, 0.82),
+                        "phase": random.uniform(0.0, math.tau),
+                        "dir": -1.0 if random.random() < 0.5 else 1.0,
+                        "w": self._compute_level_w(pos),
+                        "layer_a": None,
+                        "layer_b": None,
+                        "layer_c": layer_c,
+                        "water_spec_repeat": float(getattr(self, "water_specular_detail_repeat", 7.5)),
+                        "water_spec_speed": float(getattr(self, "water_specular_scroll_speed", 1.85)),
+                    }
+                )
+            elif self.animate_non_water_uv and forced_mode != "water":
                 self.dynamic_room_uv_nodes.append(
                     {
                         "node": node,
@@ -2737,8 +3306,9 @@ class SoulSymphony(ShowBase):
             except Exception:
                 pass
             if mode == "water":
-                u_repeat = 10.0
-                v_repeat = 10.0
+                water_repeat = float(getattr(self, "water_uv_repeat_scale", 3.2))
+                u_repeat = water_repeat
+                v_repeat = water_repeat
             else:
                 u_repeat = 0.085
                 v_repeat = 0.085
@@ -2802,6 +3372,19 @@ class SoulSymphony(ShowBase):
             gain = float(getattr(self, "texture_layer_additive_gain", 0.42))
             layer_b.setColor((gain, gain, gain, 0.0 if mode == "floor" else 0.14))
 
+            if mode == "water":
+                layer_c = TextureStage(f"water-spec-c-{len(self.dynamic_room_uv_nodes)}")
+                layer_c.setMode(TextureStage.MAdd)
+                layer_c.setSort(42)
+                node.setTexture(layer_c, self.water_specular_tex, 42)
+                try:
+                    node.setTexGen(layer_c, TexGenAttrib.MWorldPosition)
+                except Exception:
+                    pass
+                gain = float(getattr(self, "texture_layer_additive_gain", 0.42))
+                spec_strength = self._clamp(float(getattr(self, "water_specular_strength", 0.72)), 0.0, 1.0)
+                layer_c.setColor((gain, gain, gain, 0.16 + spec_strength * 0.26))
+
         should_track_dynamic_uv = mode == "water" or self.animate_non_water_uv
         if not should_track_dynamic_uv:
             return
@@ -2823,6 +3406,8 @@ class SoulSymphony(ShowBase):
                 "layer_a": layer_a,
                 "layer_b": layer_b,
                 "layer_c": layer_c,
+                "water_spec_repeat": float(getattr(self, "water_specular_detail_repeat", 7.5)),
+                "water_spec_speed": float(getattr(self, "water_specular_scroll_speed", 1.85)),
             }
         )
 
@@ -2965,6 +3550,458 @@ class SoulSymphony(ShowBase):
             node.setAlphaScale(max(0.0, entry["alpha"] * (1.0 - t) * (1.0 - t)))
             keep.append(entry)
         self.motion_trails = keep
+
+    def _trigger_hyperbomb(self) -> None:
+        if self.game_over_active or self.win_active:
+            return
+        if self.hyperbomb_cooldown > 0.0:
+            return
+        ball_r = max(0.05, float(getattr(self, "ball_radius", 0.68)))
+        self.hyperbomb_active = True
+        self.hyperbomb_timer = 0.0
+        self.hyperbomb_spawn_timer = 0.0
+        self.hyperbomb_scale_start = max(0.03, ball_r * float(getattr(self, "hyperbomb_scale_start_factor", 0.18)))
+        self.hyperbomb_max_scale = max(self.hyperbomb_scale_start * 1.25, ball_r * float(getattr(self, "hyperbomb_max_scale_factor", 6.0)))
+        self.hyperbomb_origin = self._get_hyperbomb_spawn_pos()
+        self.hyperbomb_cooldown = self.hyperbomb_cooldown_duration
+        self._play_hyperbomb_sfx(self.hyperbomb_origin)
+
+    def _get_hyperbomb_spawn_pos(self) -> Vec3:
+        if not hasattr(self, "ball_np") or self.ball_np is None or self.ball_np.isEmpty():
+            return Vec3(0, 0, 0)
+        return Vec3(self.ball_np.getPos())
+
+    def _spawn_hyperbomb_sphere(self, life_bias: float = 0.0) -> None:
+        if self.sphere_model is None:
+            return
+        source_pos = Vec3(self.hyperbomb_origin)
+        node = self.render.attachNewNode("hyperbomb-halfdome")
+        node.setPos(source_pos)
+        node.setScale(self.hyperbomb_scale_start)
+        node.setTransparency(TransparencyAttrib.MAlpha)
+        node.setDepthWrite(True)
+        node.setDepthTest(True)
+        node.setBin("fixed", 120)
+        node.setLightOff(1)
+        node.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne,
+            ),
+            1,
+        )
+
+        dome_layers: list[NodePath] = []
+        layer_count = 6
+        for layer_idx in range(layer_count):
+            dome_np = self.sphere_model.copyTo(node)
+            dome_np.clearTexture()
+            dome_np.setTransparency(TransparencyAttrib.MAlpha)
+            dome_np.setDepthWrite(True)
+            dome_np.setDepthTest(True)
+            dome_np.setLightOff(1)
+            dome_np.setShaderOff(1)
+            dome_np.setTwoSided(False)
+            dome_np.setAttrib(CullFaceAttrib.make(CullFaceAttrib.MCullClockwise))
+            dome_np.setAttrib(
+                ColorBlendAttrib.make(
+                    ColorBlendAttrib.MAdd,
+                    ColorBlendAttrib.OIncomingAlpha,
+                    ColorBlendAttrib.OOne,
+                ),
+                1,
+            )
+            dome_radius = 0.44 + layer_idx * 0.22
+            dome_height = 0.24 + layer_idx * 0.08
+            dome_np.setScale(dome_radius, dome_radius, dome_height)
+            dome_np.setZ(0.11 + layer_idx * 0.06)
+            dome_np.setH(random.uniform(0.0, 360.0))
+            dome_layers.append(dome_np)
+
+        ring_life = max(0.25, self.hyperbomb_sphere_life + life_bias)
+        phase = random.uniform(0.0, math.tau)
+        hue = ((self.hyperbomb_timer * 1.9) + random.uniform(0.0, 1.0)) % 1.0
+        hue_speed = random.uniform(2.8, 6.4)
+        max_alpha = random.uniform(0.45, 0.78)
+        self.hyperbomb_spheres.append(
+            {
+                "node": node,
+                "age": 0.0,
+                "life": ring_life,
+                "origin": source_pos,
+                "scale": self.hyperbomb_scale_start,
+                "growth": self.hyperbomb_growth_speed * random.uniform(0.86, 1.18),
+                "slowdown": self.hyperbomb_growth_slowdown * random.uniform(0.86, 1.24),
+                "phase": phase,
+                "hue": hue,
+                "hue_speed": hue_speed,
+                "alpha": max_alpha,
+                "fade_in": random.uniform(0.035, 0.11),
+                "layers": dome_layers,
+            }
+        )
+
+    def _play_hyperbomb_sfx(self, pos: Vec3) -> None:
+        if not hasattr(self, "audio3d"):
+            return
+        if not self.sfx_attackbomb_path:
+            return
+        try:
+            sound = self.audio3d.loadSfx(self.sfx_attackbomb_path)
+        except Exception:
+            sound = None
+        if not sound:
+            return
+
+        anchor = self.render.attachNewNode("hyperbomb-sfx")
+        anchor.setPos(pos)
+        self.audio3d.attachSoundToObject(sound, anchor)
+        self.audio3d.setSoundMinDistance(sound, 2.0)
+        self.audio3d.setSoundMaxDistance(sound, 280.0)
+        if hasattr(self.audio3d, "setSoundVelocityAuto"):
+            self.audio3d.setSoundVelocityAuto(sound)
+        sound.setLoop(False)
+        sound.setVolume(0.92)
+        sound.setPlayRate(1.0)
+        sound.play()
+        self.hyperbomb_audio_nodes.append(
+            {
+                "node": anchor,
+                "sound": sound,
+                "age": 0.0,
+                "life": 4.0,
+            }
+        )
+
+    def _update_hyperbomb(self, dt: float) -> None:
+        if self.hyperbomb_cooldown > 0.0:
+            self.hyperbomb_cooldown = max(0.0, self.hyperbomb_cooldown - dt)
+
+        if self.hyperbomb_active:
+            self.hyperbomb_timer += dt
+            spawn_phase = self._clamp(self.hyperbomb_timer / max(0.001, self.hyperbomb_spawn_duration), 0.0, 1.0)
+
+            if self.hyperbomb_timer <= self.hyperbomb_spawn_duration:
+                self.hyperbomb_spawn_timer -= dt
+                while self.hyperbomb_spawn_timer <= 0.0:
+                    interval = (
+                        self.hyperbomb_spawn_interval_fast
+                        + (self.hyperbomb_spawn_interval_slow - self.hyperbomb_spawn_interval_fast) * (spawn_phase * spawn_phase)
+                    )
+                    self._spawn_hyperbomb_sphere(life_bias=(1.0 - spawn_phase) * 0.2)
+                    self.hyperbomb_spawn_timer += max(0.006, interval)
+
+            if self.hyperbomb_timer >= self.hyperbomb_duration:
+                self.hyperbomb_active = False
+
+        if self.hyperbomb_spheres:
+            keep_spheres: list[dict] = []
+            for entry in self.hyperbomb_spheres:
+                node = entry.get("node")
+                if node is None or node.isEmpty():
+                    continue
+
+                entry["age"] += dt
+                age = float(entry["age"])
+                life = max(0.001, float(entry["life"]))
+                if age >= life:
+                    node.removeNode()
+                    continue
+
+                t = age / life
+                growth_falloff = max(0.08, math.exp(-entry["slowdown"] * t))
+                entry["scale"] += entry["growth"] * growth_falloff * dt
+                scale = min(self.hyperbomb_max_scale, max(0.001, entry["scale"]))
+
+                hue_speed = entry["hue_speed"] * (1.0 - 0.82 * t)
+                hue = (entry["hue"] + age * max(0.18, hue_speed)) % 1.0
+                saturation = self._clamp(0.92 - 0.32 * t, 0.0, 1.0)
+                value = self._clamp(1.0 - 0.22 * t, 0.0, 1.0)
+                r, g, b = colorsys.hsv_to_rgb(hue, saturation, value)
+
+                fade_in = max(0.001, float(entry["fade_in"]))
+                alpha_in = self._clamp(age / fade_in, 0.0, 1.0)
+                alpha_out = (1.0 - t)
+                alpha = float(entry["alpha"]) * alpha_in * (alpha_out ** 1.65)
+
+                wobble = 1.0 + 0.05 * math.sin(self.roll_time * 4.0 + entry["phase"])
+                node.setPos(entry.get("origin", self.hyperbomb_origin))
+                node.setScale(scale * wobble)
+
+                layers = entry.get("layers", [])
+                if layers:
+                    for layer_idx, dome_np in enumerate(layers):
+                        if dome_np is None or dome_np.isEmpty():
+                            continue
+                        layer_hue = (hue + layer_idx * 0.11) % 1.0
+                        lr, lg, lb = colorsys.hsv_to_rgb(layer_hue, saturation, value)
+                        layer_alpha = self._clamp(alpha * (1.0 - layer_idx * 0.13), 0.0, 1.0)
+                        dome_np.setColor(lr, lg, lb, layer_alpha)
+                else:
+                    node.setColor(r, g, b, self._clamp(alpha, 0.0, 1.0))
+                keep_spheres.append(entry)
+            self.hyperbomb_spheres = keep_spheres
+
+        if self.hyperbomb_audio_nodes:
+            keep_audio: list[dict] = []
+            for entry in self.hyperbomb_audio_nodes:
+                entry["age"] += dt
+                node = entry.get("node")
+                if node is None or node.isEmpty():
+                    continue
+                if entry["age"] >= entry.get("life", 4.0):
+                    node.removeNode()
+                    continue
+                keep_audio.append(entry)
+            self.hyperbomb_audio_nodes = keep_audio
+
+        self._apply_hyperbomb_monster_effects(dt)
+
+    def _apply_hyperbomb_monster_effects(self, dt: float) -> None:
+        if not self.monsters:
+            return
+
+        active_visual = bool(self.hyperbomb_active or self.hyperbomb_spheres)
+        if not active_visual:
+            for monster in self.monsters:
+                if monster.get("dead", False):
+                    continue
+                root = monster.get("root")
+                if root is None or root.isEmpty():
+                    continue
+                root.setAlphaScale(1.0)
+            self.hyperbomb_damage_timer = 0.0
+            return
+
+        radius = max(0.5, float(self.hyperbomb_max_scale) * float(getattr(self, "hyperbomb_damage_radius_factor", 1.05)))
+        radius_sq = radius * radius
+        alpha_k = max(0.1, float(getattr(self, "hyperbomb_alpha_log_k", 9.0)))
+        alpha_min = self._clamp(float(getattr(self, "hyperbomb_alpha_min", 0.12)), 0.0, 1.0)
+
+        self.hyperbomb_damage_timer -= dt
+        do_damage = self.hyperbomb_damage_timer <= 0.0
+        if do_damage:
+            self.hyperbomb_damage_timer = max(0.03, float(getattr(self, "hyperbomb_damage_interval", 0.12)))
+
+        damage = max(1.0, float(getattr(self, "hyperbomb_damage_per_tick", 22.0)))
+
+        for monster in self.monsters:
+            if monster.get("dead", False):
+                continue
+            root = monster.get("root")
+            if root is None or root.isEmpty():
+                continue
+
+            mpos = root.getPos()
+            dx = float(mpos.x) - float(self.hyperbomb_origin.x)
+            dy = float(mpos.y) - float(self.hyperbomb_origin.y)
+            dz = float(mpos.z) - float(self.hyperbomb_origin.z)
+            dist_sq = dx * dx + dy * dy + dz * dz
+            if dist_sq > radius_sq:
+                root.setAlphaScale(1.0)
+                continue
+
+            dist = math.sqrt(max(0.0, dist_sq))
+            r = self._clamp(dist / radius, 0.0, 1.0)
+            log_drop = math.log1p(alpha_k * r) / math.log1p(alpha_k)
+            alpha = self._clamp(1.0 - (1.0 - alpha_min) * log_drop, alpha_min, 1.0)
+            root.setAlphaScale(alpha)
+
+            if do_damage:
+                dmg_mul = self._clamp(1.0 - (r ** 1.35), 0.15, 1.0)
+                self._damage_monster(monster, damage * dmg_mul)
+
+    def _spawn_water_crystal(self) -> None:
+        if not bool(getattr(self, "water_crystal_spawn_enabled", True)):
+            return
+        if not self.water_surfaces:
+            return
+        if len(self.water_crystals) >= int(getattr(self, "water_crystal_max_count", 64)):
+            return
+
+        x = random.uniform(0.0, float(self.map_w))
+        y = random.uniform(0.0, float(self.map_d))
+        if hasattr(self, "ball_np") and self.ball_np is not None and not self.ball_np.isEmpty():
+            ball_pos = self.ball_np.getPos()
+            local_spread = max(10.0, float(getattr(self, "water_crystal_spawn_area_scale", 2.1)) * 7.0)
+            x = float(ball_pos.x) + random.uniform(-local_spread, local_spread)
+            y = float(ball_pos.y) + random.uniform(-local_spread, local_spread)
+        up = self._get_gravity_up()
+        if up.lengthSquared() < 1e-8:
+            up = Vec3(0, 0, 1)
+        else:
+            up.normalize()
+
+        water_h = self._sample_water_height(Vec3(x, y, self.floor_y + 1.0), self.roll_time)
+        if water_h is None:
+            surface = random.choice(self.water_surfaces)
+            x = random.uniform(float(surface["x0"]), float(surface["x1"]))
+            y = random.uniform(float(surface["y0"]), float(surface["y1"]))
+            water_h = self._sample_water_height(Vec3(x, y, float(surface["base_z"])), self.roll_time)
+            if water_h is None:
+                water_h = float(surface["base_z"])
+
+        float_offset = random.uniform(0.02, 0.16)
+        height_min = float(getattr(self, "water_crystal_spawn_height_min", 8.0))
+        height_max = max(height_min + 0.1, float(getattr(self, "water_crystal_spawn_height_max", 24.0)))
+        start_h = float(water_h) + random.uniform(height_min, height_max)
+        pos = Vec3(x, y, start_h)
+
+        node = self.box_model.copyTo(self.render)
+        node.setPos(pos)
+        sx = random.uniform(0.26, 0.56)
+        sy = random.uniform(0.26, 0.56)
+        sz = random.uniform(0.72, 1.45)
+        node.setScale(self.box_norm_scale)
+        node.setScale(sx, sy, sz)
+        node.setHpr(random.uniform(0.0, 360.0), random.uniform(-26.0, 26.0), random.uniform(-24.0, 24.0))
+        node.clearTexture()
+        node.setLightOff(1)
+        node.setShaderOff(1)
+
+        transparent = random.random() < 0.52
+        base_alpha = random.uniform(0.65, 0.9) if transparent else 1.0
+        if transparent:
+            node.setTransparency(TransparencyAttrib.MAlpha)
+            node.setDepthWrite(False)
+            node.setBin("transparent", 42)
+            node.setAttrib(
+                ColorBlendAttrib.make(
+                    ColorBlendAttrib.MAdd,
+                    ColorBlendAttrib.OIncomingAlpha,
+                    ColorBlendAttrib.OOne,
+                ),
+                1,
+            )
+        else:
+            node.clearTransparency()
+            node.setDepthWrite(True)
+            node.setBin("fixed", 0)
+
+        hue = random.random()
+        sat = random.uniform(0.75, 1.0)
+        val = random.uniform(0.9, 1.0)
+        r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
+        node.setColor(r, g, b, base_alpha)
+        mat = Material()
+        mat.setAmbient((min(1.0, r * 0.95), min(1.0, g * 0.95), min(1.0, b * 0.95), 1.0))
+        mat.setDiffuse((1.0, 1.0, 1.0, 1.0))
+        mat.setEmission((min(3.0, r * 2.2), min(3.0, g * 2.2), min(3.0, b * 2.2), 1.0))
+        node.setMaterial(mat, 1)
+
+        self.water_crystals.append(
+            {
+                "node": node,
+            "mat": mat,
+                "pos": pos,
+                "phase": random.uniform(0.0, math.tau),
+                "hue": hue,
+                "hue_speed": random.uniform(0.22, 0.7),
+                "sat": sat,
+                "val": val,
+                "alpha": base_alpha,
+                "transparent": transparent,
+                "fall_speed": random.uniform(0.0, 1.0),
+                "float_offset": float_offset,
+                "state": "falling",
+                "state_age": 0.0,
+            }
+        )
+
+    def _update_water_crystals(self, dt: float) -> None:
+        if bool(getattr(self, "water_crystal_spawn_enabled", True)) and self.water_surfaces:
+            if not self.water_crystals:
+                for _ in range(10):
+                    self._spawn_water_crystal()
+            self.water_crystal_spawn_timer -= dt
+            while self.water_crystal_spawn_timer <= 0.0:
+                self._spawn_water_crystal()
+                self.water_crystal_spawn_timer += max(0.05, float(getattr(self, "water_crystal_spawn_interval", 0.3)))
+        else:
+            self.water_crystal_spawn_timer = 0.0
+
+        if not self.water_crystals:
+            return
+
+        keep: list[dict] = []
+        for entry in self.water_crystals:
+            node = entry.get("node")
+            if node is None or node.isEmpty():
+                continue
+
+            pos = Vec3(entry.get("pos", node.getPos()))
+            entry["state_age"] = float(entry.get("state_age", 0.0)) + dt
+            state = str(entry.get("state", "falling"))
+
+            water_h = self._sample_water_height(pos, self.roll_time)
+            if water_h is None:
+                water_h = pos.z - 0.1
+            target_h = float(water_h) + float(entry.get("float_offset", 0.05))
+
+            if state == "falling":
+                fall_speed = float(entry.get("fall_speed", 0.0)) + float(getattr(self, "water_crystal_fall_gravity", 14.5)) * dt
+                entry["fall_speed"] = fall_speed
+                pos.z -= fall_speed * dt
+                if pos.z <= target_h:
+                    pos.z = target_h
+                    entry["state"] = "stuck"
+                    entry["state_age"] = 0.0
+            elif state == "stuck":
+                pos.z += (target_h - pos.z) * min(1.0, dt * 5.5)
+                if entry["state_age"] >= float(getattr(self, "water_crystal_stuck_duration", 0.9)):
+                    entry["state"] = "floating"
+                    entry["state_age"] = 0.0
+            elif state == "floating":
+                bob = 0.02 * math.sin(self.roll_time * 2.4 + float(entry.get("phase", 0.0)))
+                pos.z += ((target_h + bob) - pos.z) * min(1.0, dt * 4.6)
+                if entry["state_age"] >= float(getattr(self, "water_crystal_float_duration", 10.0)):
+                    entry["state"] = "fading"
+                    entry["state_age"] = 0.0
+            elif state == "fading":
+                fade_t = self._clamp(
+                    entry["state_age"] / max(0.05, float(getattr(self, "water_crystal_fade_duration", 1.5))),
+                    0.0,
+                    1.0,
+                )
+                pos.z += ((target_h + 0.015) - pos.z) * min(1.0, dt * 4.0)
+                if fade_t >= 1.0:
+                    node.removeNode()
+                    continue
+            else:
+                entry["state"] = "falling"
+                entry["state_age"] = 0.0
+
+            hue = (float(entry.get("hue", 0.0)) + self.roll_time * float(entry.get("hue_speed", 0.42))) % 1.0
+            sat = self._clamp(float(entry.get("sat", 0.9)), 0.0, 1.0)
+            val = self._clamp(float(entry.get("val", 1.0)), 0.0, 1.0)
+            r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
+
+            alpha = float(entry.get("alpha", 1.0))
+            if entry.get("state") == "fading":
+                fade_t = self._clamp(
+                    float(entry.get("state_age", 0.0)) / max(0.05, float(getattr(self, "water_crystal_fade_duration", 1.5))),
+                    0.0,
+                    1.0,
+                )
+                alpha *= (1.0 - fade_t) ** 1.6
+
+            spin = 36.0 if bool(entry.get("transparent", False)) else 24.0
+            node.setH(node.getH() + spin * dt)
+            node.setPos(pos)
+            node.setColor(r, g, b, self._clamp(alpha, 0.0, 1.0))
+            mat = entry.get("mat")
+            if mat is not None:
+                try:
+                    mat.setEmission((min(2.0, r * 1.55), min(2.0, g * 1.55), min(2.0, b * 1.55), 1.0))
+                    mat.setAmbient((min(1.0, r * 0.95), min(1.0, g * 0.95), min(1.0, b * 0.95), 1.0))
+                except Exception:
+                    pass
+
+            entry["pos"] = pos
+            keep.append(entry)
+
+        self.water_crystals = keep
 
     def _load_ball_texture(self) -> Texture:
         candidates: list[str] = []
@@ -3343,6 +4380,7 @@ class SoulSymphony(ShowBase):
         self.fall_air_timer = 0.0
         self.fall_reference_z = float(spawn.z)
         self.player_ai_target_id = None
+        self.player_ai_lock_target_id = None
         self.player_ai_target_w = float(getattr(self, "player_w", 0.0))
         self.player_ai_retarget_timer = 0.0
         self.player_ai_combo_step = 0
@@ -3361,6 +4399,7 @@ class SoulSymphony(ShowBase):
                 hum.stop()
         self.monsters = []
         self._spawn_hypercube_monsters(count=16 if self.performance_mode else 22)
+        self._attach_monster_hum_sounds()
         self._setup_monster_ai_system()
 
     def _setup_kill_protection_system(self) -> None:
@@ -4276,6 +5315,40 @@ class SoulSymphony(ShowBase):
         self.visual_alpha_targets[vid] = 1.0
         self.visual_alpha_state[vid] = 1.0
 
+    def _clear_inverted_level_echo(self) -> None:
+        root = getattr(self, "inverted_level_echo_root", None)
+        if root is not None and not root.isEmpty():
+            root.removeNode()
+        self.inverted_level_echo_root = None
+
+    def _setup_inverted_level_echo(self) -> None:
+        self._clear_inverted_level_echo()
+        if not bool(getattr(self, "enable_inverted_level_echo", True)):
+            return
+        if not self.scene_visuals:
+            return
+
+        plane_z = float(getattr(self, "inverted_level_echo_plane_z", self.floor_y + 12.0))
+        extra_offset = float(getattr(self, "inverted_level_echo_extra_offset", 0.0))
+        opacity = self._clamp(float(getattr(self, "inverted_level_echo_opacity", 0.46)), 0.08, 1.0)
+
+        root = self.world.attachNewNode("inverted-level-echo")
+        root.setPos(0.0, 0.0, 2.0 * plane_z + extra_offset)
+        root.setScale(1.0, 1.0, -1.0)
+        root.setTransparency(TransparencyAttrib.MAlpha)
+        root.setAlphaScale(opacity)
+        root.setShaderOff(1)
+
+        for visual in list(self.scene_visuals.values()):
+            if visual is None or visual.isEmpty():
+                continue
+            try:
+                visual.instanceTo(root)
+            except Exception:
+                continue
+
+        self.inverted_level_echo_root = root
+
     def _set_visual_occluded(self, visual_id: int, occluded: bool) -> None:
         if occluded:
             self.occluded_visuals.add(visual_id)
@@ -4860,7 +5933,8 @@ class SoulSymphony(ShowBase):
         return wrapped, delta
 
     def _apply_world_wrap(self) -> None:
-        wrapped_pos, delta = self._wrap_xy_position(self.ball_np.getPos(), margin=0.35, wrap_z=True)
+        wrap_margin = max(0.0, float(getattr(self, "world_wrap_margin", 0.35)))
+        wrapped_pos, delta = self._wrap_xy_position(self.ball_np.getPos(), margin=wrap_margin, wrap_z=True)
         if delta.lengthSquared() < 1e-12:
             return
 
@@ -6435,22 +7509,27 @@ class SoulSymphony(ShowBase):
         self.pending_ceiling_rects.clear()
         self.pending_floor_holes.clear()
         self.pending_ceiling_holes.clear()
+        self.water_surfaces.clear()
+        self._clear_inverted_level_echo()
 
         if getattr(self, "four_d_obstacle_arena_mode", False):
             self._build_four_d_obstacle_arena()
             self._rebuild_entrance_debug_overlay()
+            self._setup_inverted_level_echo()
             self.dungeon_built_once = True
             return
 
         if self.platform_only_mode:
             self._build_platform_only_dungeon()
             self._rebuild_entrance_debug_overlay()
+            self._setup_inverted_level_echo()
             self.dungeon_built_once = True
             return
 
         if getattr(self, "subtractive_maze_mode", False):
             self._build_subtractive_cube_maze()
             self._rebuild_entrance_debug_overlay()
+            self._setup_inverted_level_echo()
             self.dungeon_built_once = True
             return
 
@@ -6471,6 +7550,7 @@ class SoulSymphony(ShowBase):
         self._commit_floor_union()
         self._commit_ceiling_union()
         self._rebuild_entrance_debug_overlay()
+        self._setup_inverted_level_echo()
         self.dungeon_built_once = True
 
     def _build_subtractive_cube_maze(self) -> None:
@@ -6886,38 +7966,65 @@ class SoulSymphony(ShowBase):
                 continue
 
     def _build_floor_and_bounds(self) -> None:
-        floor_scale = Vec3(self.map_w / 2, self.map_d / 2, self.floor_t)
-        floor_pos = Vec3(self.map_w / 2, self.map_d / 2, self.floor_y - self.floor_t - self.water_level_offset)
-        floor_holder = self._add_box(floor_pos, floor_scale, color=(0.14, 0.16, 0.2, 1), surface_mode="wall")
-        self.hyper_enclosure_ids.add(id(floor_holder))
+        if getattr(self, "four_d_obstacle_arena_mode", False):
+            overscan = max(0.0, float(getattr(self, "water_loop_overscan", 6.0)))
+            water_half_x = self.map_w * 0.5 + overscan
+            water_half_y = self.map_d * 0.5 + overscan
+            water_half_z = max(0.08, self.floor_t * 0.32)
+            water_center_z = self.floor_y + self.water_surface_raise
+            water_holder = self._add_box(
+                Vec3(self.map_w * 0.5, self.map_d * 0.5, water_center_z),
+                Vec3(water_half_x, water_half_y, water_half_z),
+                color=(0.26, 0.52, 0.78, 0.24),
+                collidable=False,
+                surface_mode="water",
+            )
+            if water_holder is not None and not water_holder.isEmpty():
+                water_holder.setTransparency(TransparencyAttrib.MAlpha)
+                water_holder.setDepthWrite(False)
+                water_holder.setBin("transparent", 33)
+                self._register_water_surface(
+                    water_holder,
+                    -overscan,
+                    float(self.map_w) + overscan,
+                    -overscan,
+                    float(self.map_d) + overscan,
+                    float(water_center_z),
+                )
+        else:
+            floor_scale = Vec3(self.map_w / 2, self.map_d / 2, self.floor_t)
+            floor_pos = Vec3(self.map_w / 2, self.map_d / 2, self.floor_y - self.floor_t - self.water_level_offset)
+            floor_holder = self._add_box(floor_pos, floor_scale, color=(0.14, 0.16, 0.2, 1), surface_mode="wall")
+            self.hyper_enclosure_ids.add(id(floor_holder))
 
         t = 0.4
         h = self.wall_h + 4
-        bound_0 = self._add_box(Vec3(self.map_w / 2, -t, h / 2), Vec3(self.map_w / 2, t, h / 2), color=(0.2, 0.24, 0.3, 1), collidable=False)
-        bound_1 = self._add_box(Vec3(self.map_w / 2, self.map_d + t, h / 2), Vec3(self.map_w / 2, t, h / 2), color=(0.2, 0.24, 0.3, 1), collidable=False)
-        bound_2 = self._add_box(Vec3(-t, self.map_d / 2, h / 2), Vec3(t, self.map_d / 2, h / 2), color=(0.2, 0.24, 0.3, 1), collidable=False)
-        bound_3 = self._add_box(Vec3(self.map_w + t, self.map_d / 2, h / 2), Vec3(t, self.map_d / 2, h / 2), color=(0.2, 0.24, 0.3, 1), collidable=False)
-        self.hyper_enclosure_ids.update({id(bound_0), id(bound_1), id(bound_2), id(bound_3)})
+        if not getattr(self, "four_d_obstacle_arena_mode", False):
+            bound_0 = self._add_box(Vec3(self.map_w / 2, -t, h / 2), Vec3(self.map_w / 2, t, h / 2), color=(0.2, 0.24, 0.3, 1), collidable=False)
+            bound_1 = self._add_box(Vec3(self.map_w / 2, self.map_d + t, h / 2), Vec3(self.map_w / 2, t, h / 2), color=(0.2, 0.24, 0.3, 1), collidable=False)
+            bound_2 = self._add_box(Vec3(-t, self.map_d / 2, h / 2), Vec3(t, self.map_d / 2, h / 2), color=(0.2, 0.24, 0.3, 1), collidable=False)
+            bound_3 = self._add_box(Vec3(self.map_w + t, self.map_d / 2, h / 2), Vec3(t, self.map_d / 2, h / 2), color=(0.2, 0.24, 0.3, 1), collidable=False)
+            self.hyper_enclosure_ids.update({id(bound_0), id(bound_1), id(bound_2), id(bound_3)})
 
-        boundary_half_h = max(self.wall_h + 14.0, self.level_z_step * 3.0)
-        boundary_center_z = self.floor_y + boundary_half_h - 2.0
-        edge_thickness = t * 0.5 + 0.35
-        self._add_static_box_collider(
-            Vec3(self.map_w * 0.5, -t, boundary_center_z),
-            Vec3(self.map_w * 0.5 + 1.0, edge_thickness, boundary_half_h),
-        )
-        self._add_static_box_collider(
-            Vec3(self.map_w * 0.5, self.map_d + t, boundary_center_z),
-            Vec3(self.map_w * 0.5 + 1.0, edge_thickness, boundary_half_h),
-        )
-        self._add_static_box_collider(
-            Vec3(-t, self.map_d * 0.5, boundary_center_z),
-            Vec3(edge_thickness, self.map_d * 0.5 + 1.0, boundary_half_h),
-        )
-        self._add_static_box_collider(
-            Vec3(self.map_w + t, self.map_d * 0.5, boundary_center_z),
-            Vec3(edge_thickness, self.map_d * 0.5 + 1.0, boundary_half_h),
-        )
+            boundary_half_h = max(self.wall_h + 14.0, self.level_z_step * 3.0)
+            boundary_center_z = self.floor_y + boundary_half_h - 2.0
+            edge_thickness = t * 0.5 + 0.35
+            self._add_static_box_collider(
+                Vec3(self.map_w * 0.5, -t, boundary_center_z),
+                Vec3(self.map_w * 0.5 + 1.0, edge_thickness, boundary_half_h),
+            )
+            self._add_static_box_collider(
+                Vec3(self.map_w * 0.5, self.map_d + t, boundary_center_z),
+                Vec3(self.map_w * 0.5 + 1.0, edge_thickness, boundary_half_h),
+            )
+            self._add_static_box_collider(
+                Vec3(-t, self.map_d * 0.5, boundary_center_z),
+                Vec3(edge_thickness, self.map_d * 0.5 + 1.0, boundary_half_h),
+            )
+            self._add_static_box_collider(
+                Vec3(self.map_w + t, self.map_d * 0.5, boundary_center_z),
+                Vec3(edge_thickness, self.map_d * 0.5 + 1.0, boundary_half_h),
+            )
 
         self._add_static_box_collider(
             Vec3(self.map_w * 0.5, self.map_d * 0.5, self.hyper_bounds_top_z + 0.11),
@@ -8268,6 +9375,8 @@ class SoulSymphony(ShowBase):
         self.monster_contact_sfx_cooldown = max(0.0, self.monster_contact_sfx_cooldown - dt)
         self.player_damage_cooldown = max(0.0, self.player_damage_cooldown - dt)
         self.roll_time += dt
+        self._update_water_surface_waves(self.roll_time)
+        self._update_water_crystals(dt)
         self._update_ball_texture_scroll(dt)
         self.vertical_mover_update_timer -= dt
         if self.vertical_mover_update_timer <= 0.0:
@@ -8319,6 +9428,7 @@ class SoulSymphony(ShowBase):
         self._update_kill_protection_visuals(dt)
         self._update_sword_powerups(dt)
         self._update_floating_texts(dt)
+        self._update_hyperbomb(dt)
         if self.enable_particles and self.enable_motion_trails:
             self._update_motion_trails(dt)
         elif self.motion_trails:
@@ -8435,6 +9545,8 @@ class SoulSymphony(ShowBase):
             force_mag = self.scroll_lift_up_force if self.scroll_lift_value > 0.0 else self.scroll_lift_down_force
             self.ball_body.applyCentralForce(gravity_up * (self.scroll_lift_value * force_mag))
 
+        self._apply_water_buoyancy(dt)
+
         if self.zero_g_mode:
             self.ball_body.setRestitution(self.normal_restitution)
         else:
@@ -8496,6 +9608,7 @@ class SoulSymphony(ShowBase):
             self.player_ai_enabled = False
             self.player_ai_idle_timer = 0.0
             self.player_ai_target_id = None
+            self.player_ai_lock_target_id = None
             self.player_ai_retarget_timer = 0.0
             self.player_ai_combo_step = 0
             self.player_ai_combo_timer = 0.0

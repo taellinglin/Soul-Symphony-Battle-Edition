@@ -13,7 +13,7 @@ def setup_weapon_system(game) -> None:
     game.sword_side_offset = max(game.sword_side_offset, 0.22 * min(1.25, sword_scale))
     game.sword_reach = max(game.sword_reach, 1.8 * sword_scale)
     emissive = Material()
-    emissive.setEmission((0.22, 0.95, 1.0, 1.0))
+    emissive.setEmission((0.45, 1.0, 1.0, 1.0))
     emissive.setDiffuse((0.05, 0.08, 0.12, 1.0))
     emissive.setAmbient((0.03, 0.05, 0.08, 1.0))
     game.sword_emissive_material = emissive
@@ -40,31 +40,29 @@ def setup_weapon_system(game) -> None:
     blade.setPos(game.box_norm_offset)
     blade.setScale(game.box_norm_scale)
     blade.setPos(0, 0.74 * sword_scale, 0)
-    blade.setScale(0.06 * sword_scale, 0.74 * sword_scale, 0.035 * sword_scale)
+    blade.setScale(0.082 * sword_scale, 0.74 * sword_scale, 0.052 * sword_scale)
     blade.setColor(0.82, 0.94, 1.0, 1)
     blade.clearTexture()
     blade.setTexture(game.level_checker_tex, 1)
     blade.setMaterial(game.sword_emissive_material, 1)
-    blade.setLightOff(1)
     game.sword_blade_np = blade
 
     tip = game.box_model.copyTo(game.sword_pivot)
     tip.setPos(game.box_norm_offset)
     tip.setScale(game.box_norm_scale)
     tip.setPos(0, 1.37 * sword_scale, 0)
-    tip.setScale(0.035 * sword_scale, 0.12 * sword_scale, 0.02 * sword_scale)
+    tip.setScale(0.052 * sword_scale, 0.12 * sword_scale, 0.032 * sword_scale)
     tip.setColor(0.9, 0.98, 1.0, 1)
     tip.clearTexture()
     tip.setTexture(game.level_checker_tex, 1)
     tip.setMaterial(game.sword_emissive_material, 1)
-    tip.setLightOff(1)
     game.sword_tip_blade_np = tip
 
     glow = game.box_model.copyTo(game.sword_pivot)
     glow.setPos(game.box_norm_offset)
     glow.setScale(game.box_norm_scale)
     glow.setPos(0, 0.84 * sword_scale, 0)
-    glow.setScale(0.045 * sword_scale, 0.78 * sword_scale, 0.022 * sword_scale)
+    glow.setScale(0.062 * sword_scale, 0.78 * sword_scale, 0.034 * sword_scale)
     glow.setColor(0.18, 0.95, 1.0, 0.94)
     glow.setTransparency(TransparencyAttrib.MAlpha)
     glow.setBin("transparent", 30)
@@ -82,8 +80,8 @@ def setup_weapon_system(game) -> None:
         stripe = game.box_model.copyTo(game.sword_pivot)
         stripe.setPos(game.box_norm_offset)
         stripe.setScale(game.box_norm_scale)
-        stripe.setPos(0.062 * sx * sword_scale, 0.8 * sword_scale, 0.0)
-        stripe.setScale(0.007 * sword_scale, 0.72 * sword_scale, 0.029 * sword_scale)
+        stripe.setPos(0.078 * sx * sword_scale, 0.8 * sword_scale, 0.0)
+        stripe.setScale(0.01 * sword_scale, 0.72 * sword_scale, 0.039 * sword_scale)
         stripe.setColor(0.6, 1.0, 1.0, 0.92)
         stripe.clearTexture()
         stripe.setTexture(game.sword_stripe_stage, game.sword_stripe_tex)
@@ -108,6 +106,95 @@ def setup_weapon_system(game) -> None:
     game.sword_slash_emit_timer = 0.0
     game.sword_slash_emit_interval = 1.0 / 85.0
     game.sword_prev_tip_pos = None
+    game.sword_blade_echo_nodes = []
+    game.sword_blade_echo_emit_timer = 0.0
+    game.sword_blade_echo_emit_interval = 1.0 / 120.0
+    game.sword_blade_echo_max_frames = 16
+    game.sword_blade_echo_life = 0.4
+    game.sword_blade_echo_cycle = 0
+    game.sword_blade_echo_colors = [
+        (1.0, 0.0, 0.0),
+        (1.0, 0.5, 0.0),
+        (1.0, 1.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+        (0.29, 0.0, 0.51),
+        (0.56, 0.0, 1.0),
+    ]
+    game.sword_blade_echo_scale = Vec3(0.095 * sword_scale, 0.74 * sword_scale, 0.072 * sword_scale)
+
+
+def _update_blade_echoes(game, dt: float) -> None:
+    keep = []
+    for entry in game.sword_blade_echo_nodes:
+        holder = entry.get("node")
+        blade = entry.get("blade")
+        if holder is None or holder.isEmpty() or blade is None or blade.isEmpty():
+            continue
+
+        age = float(entry.get("age", 0.0)) + dt
+        life = max(1e-4, float(entry.get("life", 0.35)))
+        if age >= life:
+            holder.removeNode()
+            continue
+
+        t = max(0.0, min(1.0, age / life))
+        fade = max(0.0, 1.0 - t)
+        color = entry.get("color", (1.0, 1.0, 1.0))
+        white_mix = max(0.0, 1.0 - t * 1.8)
+        r = color[0] * (1.0 - white_mix) + 1.0 * white_mix
+        g = color[1] * (1.0 - white_mix) + 1.0 * white_mix
+        b = color[2] * (1.0 - white_mix) + 1.0 * white_mix
+        blade.setColorScale(r, g, b, fade * 0.86)
+
+        entry["age"] = age
+        keep.append(entry)
+
+    game.sword_blade_echo_nodes = keep
+
+
+def _spawn_blade_echo(game, sword_scale: float) -> None:
+    if not hasattr(game, "sword_blade_np"):
+        return
+    blade_src = game.sword_blade_np
+    if blade_src is None or blade_src.isEmpty():
+        return
+
+    holder = game.world.attachNewNode("sword-blade-echo")
+    holder.setMat(game.render, blade_src.getMat(game.render))
+
+    blade = game.box_model.copyTo(holder)
+    blade.setPos(game.box_norm_offset)
+    blade.setScale(game.box_norm_scale)
+    stretch_scale = getattr(game, "sword_blade_echo_scale", Vec3(0.095 * sword_scale, 0.74 * sword_scale, 0.072 * sword_scale))
+    blade.setScale(stretch_scale)
+    blade.clearTexture()
+    blade.setMaterial(game.sword_emissive_material, 1)
+    blade.setTransparency(TransparencyAttrib.MAlpha)
+    blade.setDepthWrite(False)
+    blade.setBin("transparent", 34)
+
+    colors = getattr(game, "sword_blade_echo_colors", None) or [(1.0, 1.0, 1.0)]
+    idx = int(getattr(game, "sword_blade_echo_cycle", 0)) % len(colors)
+    color = colors[idx]
+    game.sword_blade_echo_cycle = idx + 1
+
+    game.sword_blade_echo_nodes.append(
+        {
+            "node": holder,
+            "blade": blade,
+            "age": 0.0,
+            "life": float(getattr(game, "sword_blade_echo_life", 0.4)),
+            "color": color,
+        }
+    )
+
+    max_frames = max(1, int(getattr(game, "sword_blade_echo_max_frames", 5)))
+    while len(game.sword_blade_echo_nodes) > max_frames:
+        oldest = game.sword_blade_echo_nodes.pop(0)
+        old_node = oldest.get("node")
+        if old_node is not None and not old_node.isEmpty():
+            old_node.removeNode()
 
 
 def _update_slash_trails(game, dt: float, sword_scale: float) -> None:
@@ -235,6 +322,7 @@ def update_weapon_system(game, dt: float) -> None:
         return
     sword_scale = max(1.0, float(getattr(game, "ball_radius", 0.4)) / 0.4)
     _update_slash_trails(game, dt, sword_scale)
+    _update_blade_echoes(game, dt)
 
     desired_forward = Vec3(game.last_move_dir.x, game.last_move_dir.y, 0)
     if desired_forward.lengthSquared() < 1e-6:
@@ -314,6 +402,15 @@ def update_weapon_system(game, dt: float) -> None:
 
     game.sword_pivot.setPos(game.sword_anchor_pos)
     game.sword_pivot.setHpr(heading + yaw_offset, pitch, roll)
+
+    should_emit_blade_echo = game.attack_mode in ("swing", "spin")
+    if should_emit_blade_echo:
+        game.sword_blade_echo_emit_timer -= dt
+        if game.sword_blade_echo_emit_timer <= 0.0:
+            _spawn_blade_echo(game, sword_scale)
+            game.sword_blade_echo_emit_timer = float(getattr(game, "sword_blade_echo_emit_interval", 1.0 / 120.0))
+    else:
+        game.sword_blade_echo_emit_timer = 0.0
 
     if hasattr(game, "sword_glow_np") and game.sword_glow_np is not None:
         glow_boost = 1.0
