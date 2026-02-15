@@ -1751,6 +1751,29 @@ class SoulSymphony(ShowBase):
         input_ui = getattr(self, "input_hud_ui", None)
         if input_ui is not None and not input_ui.isEmpty():
             input_ui.setPos(left + margin_x, 0.0, bottom + (margin_y + 0.09))
+            try:
+                min_pt, max_pt = input_ui.getTightBounds()
+                if min_pt is not None and max_pt is not None:
+                    hud_pad = 0.012
+                    shift_x = 0.0
+                    shift_z = 0.0
+                    min_x_allowed = left + hud_pad
+                    max_x_allowed = right - hud_pad
+                    min_z_allowed = bottom + hud_pad
+                    max_z_allowed = top - hud_pad
+                    if min_pt.x < min_x_allowed:
+                        shift_x += (min_x_allowed - min_pt.x)
+                    if max_pt.x > max_x_allowed:
+                        shift_x -= (max_pt.x - max_x_allowed)
+                    if min_pt.z < min_z_allowed:
+                        shift_z += (min_z_allowed - min_pt.z)
+                    if max_pt.z > max_z_allowed:
+                        shift_z -= (max_pt.z - max_z_allowed)
+                    if abs(shift_x) > 1e-6 or abs(shift_z) > 1e-6:
+                        cur = input_ui.getPos()
+                        input_ui.setPos(cur.x + shift_x, cur.y, cur.z + shift_z)
+            except Exception:
+                pass
 
         holo_ui = getattr(self, "holo_map_ui", None)
         if holo_ui is not None and not holo_ui.isEmpty():
