@@ -797,6 +797,7 @@ class SoulSymphony(ShowBase):
         self.network_recv_running = False
         self.remote_players: dict[str, dict] = {}
         self.remote_player_speed = 6.5
+        self.network_pos_offset = Vec3(-20.0, -20.0, 0.0)
         self.network_display_name = "Player"
         self.network_client_id = f"local-{uuid.uuid4().hex[:8]}"
         self.network_send_interval = 0.08
@@ -1092,6 +1093,7 @@ class SoulSymphony(ShowBase):
             self.ball_np.setPos(spawn)
             self.ball_body.setLinearVelocity(Vec3(0, 0, 0))
             self.ball_body.setAngularVelocity(Vec3(0, 0, 0))
+            self._write_spawn_center_hint()
         self._setup_kill_protection_system()
         self._initialize_infinite_world_goal()
         self._setup_weapon()
@@ -3880,6 +3882,10 @@ class SoulSymphony(ShowBase):
         if mode_key == getattr(self, "bgm_mode", None):
             return
         self.bgm_mode = mode_key
+        if mode_key == "boss":
+            boss_path = "bgm/Boss.mp3"
+            if os.path.exists(boss_path) and self._play_bgm_path(boss_path):
+                return
         target_stem = "boss" if mode_key == "boss" else "soundtrack"
         target_path = self._resolve_bgm_named_track(target_stem)
         if target_path and self._play_bgm_path(target_path):
@@ -7075,7 +7081,7 @@ class SoulSymphony(ShowBase):
         label.setTextColor(0.82, 0.95, 1.0, 0.95)
         label_np = root.attachNewNode(label)
         label_np.setPos(0.0, 0.0, 0.02)
-        label_np.setScale(0.035)
+        label_np.setScale(0.03)
 
         root.hide()
         self.client_list_ui = root
@@ -7595,7 +7601,7 @@ class SoulSymphony(ShowBase):
             parent=root,
             text="Host",
             scale=0.06,
-            pos=(0.1, 0.0, 0.1),
+            pos=(-0.16, 0.0, -0.27),
             text_font=self.ui_font,
             command=self._on_host_pressed,
         )
@@ -7603,7 +7609,7 @@ class SoulSymphony(ShowBase):
             parent=root,
             text="Connect",
             scale=0.06,
-            pos=(0.1, 0.0, -0.05),
+            pos=(0.16, 0.0, -0.27),
             text_font=self.ui_font,
             command=self._on_connect_pressed,
         )
@@ -7618,6 +7624,50 @@ class SoulSymphony(ShowBase):
         )
         root.hide()
         self.network_menu_root = root
+
+    def _write_spawn_center_hint(self) -> None:
+        spawn = getattr(self, "platform_course_spawn_pos", None)
+        if spawn is None:
+            return
+        try:
+            hint_path = os.path.join(os.path.dirname(__file__), "spawn_center.json")
+            mobius_enabled = bool(getattr(self, "mobius_twist_enabled", False))
+            mobius_ratio = float(getattr(self, "mobius_middle_band_ratio", 0.28))
+            map_d = float(getattr(self, "map_d", spawn.y * 2.0))
+            mobius_links = []
+            for link in getattr(self, "warp_links", []):
+                if link.get("mode") != "room_fold" or not bool(link.get("mobius", False)):
+                    continue
+                a_pos = link.get("a_pos")
+                b_pos = link.get("b_pos")
+                if a_pos is None or b_pos is None:
+                    continue
+                try:
+                    mobius_links.append(
+                        {
+                            "a": [float(a_pos.x), float(a_pos.y), float(a_pos.z)],
+                            "b": [float(b_pos.x), float(b_pos.y), float(b_pos.z)],
+                            "radius": float(link.get("radius", 1.2)),
+                        }
+                    )
+                except Exception:
+                    continue
+            payload = {
+                "x": float(spawn.x),
+                "y": float(spawn.y),
+                "mobius_enabled": mobius_enabled,
+                "mobius_band_ratio": mobius_ratio,
+                "mobius_center_y": map_d * 0.5,
+                "mobius_links": mobius_links,
+                "map_w": float(getattr(self, "map_w", 0.0)),
+                "map_d": float(getattr(self, "map_d", 0.0)),
+                "floor_y": float(getattr(self, "floor_y", 0.0)),
+                "inverted_plane_z": float(getattr(self, "inverted_level_echo_plane_z", 0.0)),
+            }
+            with open(hint_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+        except Exception:
+            pass
 
     def _toggle_network_menu(self) -> None:
         if self.network_menu_root is None or self.network_menu_root.isEmpty():
@@ -8024,7 +8074,7 @@ class SoulSymphony(ShowBase):
                 if root is None or root.isEmpty():
                     return
                 src_pos = root.getPos(self.render)
-            self._trigger_hyperbomb_at(Vec3(src_pos))
+            self._trigger_hyperbomb_at(Vec3(src_pos), set_cooldown=False)
         elif kind in {"rocket", "missile"}:
             key = f"{client_id}:rocket"
             last = float(self.network_remote_attack_time.get(key, -999.0))
@@ -8049,7 +8099,7 @@ class SoulSymphony(ShowBase):
                 self._apply_remote_magic_missile_hits(Vec3(src_pos), Vec2(fwd))
             self._spawn_remote_magic_missiles(Vec3(src_pos), Vec2(fwd))
 
-    def _apply_remote_sword_hits(self, source_pos: Vec3, forward: Vec2, is_spin: bool) -> None:
+    def _apply_remote_sword_hits(self, source_pos: Vec3, forward: Vec2, is_spin: bool, attacker_w: float | None = None) -> None:
         if not self.monsters:
             return
         swing_forward = Vec3(forward.x, forward.y, 0.0)
@@ -8063,6 +8113,7 @@ class SoulSymphony(ShowBase):
         max_damage = 80.0 if is_spin else 60.0
         damage = min(max_damage, base_damage * dmg_mult)
 
+        w_scale = max(0.1, float(getattr(self, "w_dimension_distance_scale", 4.0)))
         for monster in self.monsters:
             if monster.get("dead", False):
                 continue
@@ -8073,7 +8124,13 @@ class SoulSymphony(ShowBase):
             planar = Vec3(to_monster.x, to_monster.y, 0.0)
             planar_dist = planar.length()
             max_reach = self.sword_reach * reach_mult + float(monster.get("radius", 1.0)) * 0.65
-            if planar_dist > max_reach:
+            if attacker_w is not None:
+                monster_w = float(monster.get("w", 0.0))
+                dw_scaled = (monster_w - float(attacker_w)) * w_scale
+                dist4d = math.sqrt(max(0.0, planar_dist * planar_dist + dw_scaled * dw_scaled))
+                if dist4d > max_reach:
+                    continue
+            elif planar_dist > max_reach:
                 continue
             if not is_spin:
                 if planar_dist < 1e-6 or swing_forward.lengthSquared() < 1e-6:
@@ -8083,7 +8140,7 @@ class SoulSymphony(ShowBase):
                     continue
             self._damage_monster_from(monster, damage, source_pos, swing_forward)
 
-    def _apply_remote_magic_missile_hits(self, source_pos: Vec3, forward: Vec2) -> None:
+    def _apply_remote_magic_missile_hits(self, source_pos: Vec3, forward: Vec2, attacker_w: float | None = None) -> None:
         if not self.monsters:
             return
         targets = self._get_live_monster_targets()
@@ -8102,15 +8159,24 @@ class SoulSymphony(ShowBase):
         if fwd_vec.lengthSquared() > 1e-6:
             fwd_vec.normalize()
 
+        w_scale = max(0.1, float(getattr(self, "w_dimension_distance_scale", 4.0)))
         scored: list[tuple[float, dict]] = []
         for monster in targets:
             root = monster.get("root")
             if root is None or root.isEmpty():
                 continue
             dist = (root.getPos() - source_pos).length()
-            if dist > max_range:
-                continue
-            scored.append((dist, monster))
+            if attacker_w is not None:
+                monster_w = float(monster.get("w", 0.0))
+                dw_scaled = (monster_w - float(attacker_w)) * w_scale
+                dist4d = math.sqrt(max(0.0, dist * dist + dw_scaled * dw_scaled))
+                if dist4d > max_range:
+                    continue
+                scored.append((dist4d, monster))
+            else:
+                if dist > max_range:
+                    continue
+                scored.append((dist, monster))
 
         scored.sort(key=lambda item: item[0])
         for _, monster in scored[:count]:
@@ -8206,8 +8272,8 @@ class SoulSymphony(ShowBase):
 
         self.sword_slash_nodes.append({"node": holder, "age": 0.0, "life": 0.14})
 
-    def _trigger_hyperbomb_at(self, origin: Vec3) -> None:
-        if self.hyperbomb_cooldown > 0.0:
+    def _trigger_hyperbomb_at(self, origin: Vec3, set_cooldown: bool = True) -> None:
+        if set_cooldown and self.hyperbomb_cooldown > 0.0:
             return
         ball_r = max(0.05, float(getattr(self, "ball_radius", 0.68)))
         self.hyperbomb_active = True
@@ -8216,7 +8282,8 @@ class SoulSymphony(ShowBase):
         self.hyperbomb_scale_start = max(0.03, ball_r * float(getattr(self, "hyperbomb_scale_start_factor", 0.18)))
         self.hyperbomb_max_scale = max(self.hyperbomb_scale_start * 1.25, ball_r * float(getattr(self, "hyperbomb_max_scale_factor", 6.0)))
         self.hyperbomb_origin = Vec3(origin)
-        self.hyperbomb_cooldown = self.hyperbomb_cooldown_duration
+        if set_cooldown:
+            self.hyperbomb_cooldown = self.hyperbomb_cooldown_duration
         self._play_hyperbomb_sfx(self.hyperbomb_origin)
 
     def _ensure_remote_player(self, client_id: str) -> dict:
@@ -8355,7 +8422,7 @@ class SoulSymphony(ShowBase):
                 self.remote_players.pop(client_id, None)
                 continue
             if bool(entry.get("has_pos", False)) and "pos" in entry:
-                target = Vec3(entry.get("pos"))
+                target = Vec3(entry.get("pos")) + Vec3(getattr(self, "network_pos_offset", Vec3(0.0, 0.0, 0.0)))
                 current = root.getPos()
                 blend = min(1.0, dt * 10.0)
                 root.setPos(current + (target - current) * blend)
