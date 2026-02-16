@@ -3,7 +3,7 @@ import os
 import random
 from typing import Any
 
-from panda3d.core import Shader, Vec3
+from panda3d.core import Shader, TransparencyAttrib, Vec3
 
 
 def _ensure_boss_arena_shader(game: Any):
@@ -69,6 +69,11 @@ def _clear_boss_room_arena(game: Any) -> None:
         root.removeNode()
     game.boss_room_arena_root = None
     game.boss_room_shader_nodes = []
+    inverted_root = getattr(game, "boss_room_inverted_root", None)
+    if inverted_root is not None and (not inverted_root.isEmpty()):
+        inverted_root.removeNode()
+    game.boss_room_inverted_root = None
+    game.boss_room_platform_movers = []
     for node in list(getattr(game, "boss_room_water_nodes", [])):
         if node is None or node.isEmpty():
             continue
@@ -137,6 +142,10 @@ def _stash_world_for_boss(game: Any) -> None:
     game.water_surfaces = []
     game.boss_room_hidden_visual_ids = hidden_ids
     game.boss_room_hidden_nodes = hidden_nodes
+    game.boss_room_prev_liminal_nodes = list(getattr(game, "liminal_fold_nodes", []))
+    game.boss_room_prev_liminal_links = dict(getattr(game, "liminal_fold_links", {}))
+    game.liminal_fold_nodes = []
+    game.liminal_fold_links = {}
 
 
 def _restore_world_after_boss(game: Any) -> None:
@@ -156,6 +165,16 @@ def _restore_world_after_boss(game: Any) -> None:
     if hasattr(game, "boss_room_prev_water_surfaces"):
         game.water_surfaces = list(getattr(game, "boss_room_prev_water_surfaces", []))
         game.boss_room_prev_water_surfaces = []
+    if hasattr(game, "boss_room_prev_liminal_nodes"):
+        game.liminal_fold_nodes = list(getattr(game, "boss_room_prev_liminal_nodes", []))
+        game.liminal_fold_links = dict(getattr(game, "boss_room_prev_liminal_links", {}))
+        game.boss_room_prev_liminal_nodes = []
+        game.boss_room_prev_liminal_links = {}
+    if hasattr(game, "boss_room_prev_hyper_bounds_top_z"):
+        game.hyper_bounds_top_z = float(getattr(game, "boss_room_prev_hyper_bounds_top_z"))
+        game.hyper_bounds_bottom_z = float(getattr(game, "boss_room_prev_hyper_bounds_bottom_z"))
+        game.boss_room_prev_hyper_bounds_top_z = None
+        game.boss_room_prev_hyper_bounds_bottom_z = None
     game.enable_scene_culling = bool(getattr(game, "boss_room_prev_scene_culling", True))
     game.enable_wall_occlusion_culling = bool(getattr(game, "boss_room_prev_wall_occlusion", True))
     game.boss_room_prev_scene_culling = True
@@ -165,137 +184,247 @@ def _restore_world_after_boss(game: Any) -> None:
 def cleanup_boss_room(game: Any) -> None:
     _clear_boss_room_arena(game)
     _restore_world_after_boss(game)
+    remote_players = getattr(game, "remote_players", None)
+    if isinstance(remote_players, dict):
+        for entry in remote_players.values():
+            if isinstance(entry, dict):
+                entry.pop("boss_warp_pos", None)
 
 
 def _build_hex_boss_arena(game: Any, room_idx: int, center: Vec3) -> None:
     _clear_boss_room_arena(game)
-    root = game.world.attachNewNode("boss-room-hex-arena")
+    root = game.world.attachNewNode("boss-room-arena")
     root.setPos(center)
     root.setTag("boss_arena", "1")
     game.boss_room_arena_root = root
     game.boss_room_shader_nodes = []
     game.boss_room_arena_collider_nodes = []
+    game.boss_room_platform_movers = []
 
-    room = game.rooms[room_idx]
-    room_span = max(8.2, min(room.w, room.h) * 0.72)
-    arena_radius = max(8.0, min(14.0, room_span * 0.95))
-    wall_thickness = 0.95
-    wall_height = max(6.2, min(12.5, game.wall_h * 1.8))
-    side_length = max(2.8, arena_radius)
+    floor_y = float(center.z) - 2.0
+    center_local = Vec3(0.0, 0.0, 0.0)
+    arena_scale = 0.62
+    map_w_used = float(getattr(game, "map_w", 176.0)) * arena_scale
+    map_d_used = float(getattr(game, "map_d", 176.0)) * arena_scale
+    margin = 8.0 * arena_scale
+    inner_w = max(8.0, map_w_used - margin * 2.0)
+    inner_h = max(8.0, map_d_used - margin * 2.0)
 
-    floor_tex = game._get_random_room_texture()
-    wall_tex = game.level_checker_tex
-    ceiling_tex = getattr(game, "water_base_tex", wall_tex)
-
-    water_plane = game._add_box(
-        Vec3(0.0, 0.0, -3.2),
-        Vec3(arena_radius * 1.25, arena_radius * 1.25, 0.18),
-        color=(0.12, 0.2, 0.28, 1.0),
+    overscan = max(0.0, float(getattr(game, "water_loop_overscan", 6.0))) * arena_scale
+    water_half_x = map_w_used * 0.5 + overscan
+    water_half_y = map_d_used * 0.5 + overscan
+    water_half_z = max(0.08, float(getattr(game, "floor_t", 0.2)) * 0.32)
+    water_center_z = floor_y + float(getattr(game, "water_surface_raise", 0.0))
+    water_holder = game._add_box(
+        Vec3(center_local.x, center_local.y, water_center_z - center.z),
+        Vec3(water_half_x, water_half_y, water_half_z),
+        color=(0.26, 0.52, 0.78, 0.24),
         parent=root,
         collidable=False,
         surface_mode="water",
     )
-    water_plane.setTag("boss_water", "1")
-    if getattr(game, "water_surface_shader", None) is not None:
-        try:
-            water_plane.setShader(game.water_surface_shader)
-            game._apply_water_surface_room_texture(water_plane)
-        except Exception:
-            pass
-    game._register_water_surface(
-        water_plane,
-        -arena_radius * 1.25,
-        arena_radius * 1.25,
-        -arena_radius * 1.25,
-        arena_radius * 1.25,
-        center.z - 3.2,
-    )
-    game.boss_room_water_nodes = [water_plane]
+    if water_holder is not None and not water_holder.isEmpty():
+        water_holder.setTransparency(TransparencyAttrib.MAlpha)
+        water_holder.setDepthWrite(False)
+        water_holder.setBin("transparent", 33)
+        if getattr(game, "water_surface_shader", None) is not None:
+            water_holder.setShader(game.water_surface_shader)
+            if hasattr(game, "_apply_water_surface_room_texture"):
+                game._apply_water_surface_room_texture(water_holder)
+            if water_holder not in getattr(game, "water_shader_nodes", []):
+                game.water_shader_nodes.append(water_holder)
+        if hasattr(game, "_register_water_surface"):
+            min_x = float(center.x) - map_w_used * 0.5 - overscan
+            max_x = float(center.x) + map_w_used * 0.5 + overscan
+            min_y = float(center.y) - map_d_used * 0.5 - overscan
+            max_y = float(center.y) + map_d_used * 0.5 + overscan
+            game._register_water_surface(water_holder, min_x, max_x, min_y, max_y, float(water_center_z))
+        game.boss_room_water_nodes.append(water_holder)
 
-    floor_base = game._add_box(
-        Vec3(0.0, 0.0, -0.6),
-        Vec3(arena_radius * 1.06, arena_radius * 1.06, 0.6),
-        color=(0.58, 0.82, 1.0, 1.0),
+    ring_count = 4 if getattr(game, "performance_mode", False) else 5
+    seg_base = 8 if getattr(game, "performance_mode", False) else 10
+    arena_radius_max = max(6.5, min(inner_w, inner_h) * 0.44)
+    arena_radius_min = max(4.8, arena_radius_max * 0.32)
+    hyper_w_limit = float(getattr(game, "hyper_w_limit", 7.2))
+
+    hub_size = max(4.6, arena_radius_min * 0.8)
+    hub_half = Vec3(hub_size, hub_size, 0.7)
+    hub = game._add_box(
+        center_local + Vec3(0.0, 0.0, 2.6),
+        hub_half,
+        color=(0.28, 0.46, 0.68, 1.0),
         parent=root,
         collidable=False,
+        motion_group="platform",
+        w_coord=0.0,
         surface_mode="floor",
     )
-    _apply_boss_surface_style(game, floor_base, "floor", floor_tex, (0.56, 0.92, 1.0, 1.0))
-
-    tile_span = max(1.3, arena_radius / 8.0)
-    tile_half_xy = tile_span * 0.52
-    grid_steps = max(5, int(arena_radius / tile_span) + 2)
-    base_z = -0.82
-    for ix in range(-grid_steps, grid_steps + 1):
-        x = ix * tile_span
-        for iy in range(-grid_steps, grid_steps + 1):
-            y = iy * tile_span
-            if not _hex_contains_xy(x, y, arena_radius * 0.95):
-                continue
-
-            top_z = _boss_terrain_height(x, y, arena_radius)
-            half_z = max(0.24, (top_z - base_z) * 0.5)
-            center_z = base_z + half_z
-            terrain_block = game._add_box(
-                Vec3(x, y, center_z),
-                Vec3(tile_half_xy, tile_half_xy, half_z),
-                color=(0.58, 0.86, 1.0, 1.0),
+    hub_collider = game._add_static_box_collider(
+        center + Vec3(0.0, 0.0, 2.6),
+        Vec3(hub_half),
+        hpr=None,
+        visual_holder=hub,
+    )
+    game.boss_room_arena_collider_nodes.append(hub_collider)
+    if hasattr(game, "_register_vertical_mover"):
+        game._register_vertical_mover(hub, hub_collider, "platform")
+    game.boss_room_hub_pos = Vec3(center) + Vec3(0.0, 0.0, 2.6)
+    game.boss_room_hub_half = Vec3(hub_half)
+    for ring in range(ring_count):
+        ring_t = ring / max(1, ring_count - 1)
+        radius = arena_radius_min + (arena_radius_max - arena_radius_min) * ring_t
+        segments = seg_base + ring * 2
+        z_base = 0.4 + ring * 2.1
+        for seg in range(segments):
+            ang = (math.tau * seg) / max(1, segments)
+            arc_jitter = random.uniform(-0.22, 0.22)
+            x = math.cos(ang + arc_jitter) * radius
+            y = math.sin(ang + arc_jitter) * radius
+            z = z_base + math.sin(ang * 2.0 + ring_t * math.pi) * 1.1
+            hx = random.uniform(1.2, 2.0)
+            hy = random.uniform(1.2, 2.0)
+            hz = random.uniform(0.24, 0.46)
+            w_coord = max(-hyper_w_limit, min(hyper_w_limit, math.sin(ang * 2.0 + ring * 0.73) * hyper_w_limit * (0.35 + 0.52 * ring_t)))
+            moving = (seg % 3 == 0) and (random.random() < 0.5)
+            color = (
+                0.3 + 0.24 * ring_t,
+                0.42 + 0.32 * (0.5 + 0.5 * math.sin(ang + ring_t)),
+                0.7 + 0.24 * (0.5 + 0.5 * math.cos(ang * 1.4)),
+                1.0,
+            )
+            plat = game._add_box(
+                Vec3(x, y, z),
+                Vec3(hx, hy, hz),
+                color=color,
                 parent=root,
-                collidable=True,
+                collidable=False,
+                motion_group=("platform" if moving else None),
+                w_coord=w_coord,
                 surface_mode="floor",
             )
-            _apply_boss_surface_style(game, terrain_block, "floor", floor_tex, (0.56, 0.92, 1.0, 1.0))
+            plat_collider = game._add_static_box_collider(
+                center + Vec3(x, y, z),
+                Vec3(hx, hy, hz),
+                hpr=None,
+                visual_holder=plat,
+            )
+            game.boss_room_arena_collider_nodes.append(plat_collider)
+            if moving:
+                axis = Vec3(-math.sin(ang), math.cos(ang), 0.0)
+                if axis.lengthSquared() < 1e-8:
+                    axis = Vec3(1.0, 0.0, 0.0)
+                else:
+                    axis.normalize()
+                mover_kind = "vertical" if (seg % 2 == 0) else "horizontal"
+                amp = random.uniform(0.6, 1.4) * max(1.0, arena_scale)
+                speed = random.uniform(0.65, 1.35)
+                game.boss_room_platform_movers.append(
+                    {
+                        "visual": plat,
+                        "body_np": plat_collider,
+                        "base": Vec3(x, y, z),
+                        "axis": axis,
+                        "amp": amp,
+                        "speed": speed,
+                        "phase": random.uniform(0.0, math.tau),
+                        "kind": mover_kind,
+                    }
+                )
 
-    ceiling = game._add_box(
-        Vec3(0.0, 0.0, wall_height + 0.72),
-        Vec3(arena_radius * 1.02, arena_radius * 1.02, 0.38),
-        color=(0.92, 0.4, 1.0, 1.0),
-        parent=root,
-        collidable=False,
+            if seg % 2 == 0:
+                pillar_h = random.uniform(0.9, 2.2)
+                pillar = game._add_box(
+                    Vec3(x, y, z + hz + pillar_h * 0.5),
+                    Vec3(0.22, 0.22, pillar_h * 0.5),
+                    color=(0.22, 0.66, 0.92, 1.0),
+                    parent=root,
+                    collidable=False,
+                    w_coord=w_coord,
+                    surface_mode="floor",
+                )
+                pillar_collider = game._add_static_box_collider(
+                    center + Vec3(x, y, z + hz + pillar_h * 0.5),
+                    Vec3(0.22, 0.22, pillar_h * 0.5),
+                    hpr=None,
+                    visual_holder=pillar,
+                )
+                game.boss_room_arena_collider_nodes.append(pillar_collider)
+
+    top_collider = game._add_static_box_collider(
+        Vec3(center.x, center.y, float(getattr(game, "hyper_bounds_top_z", floor_y + 40.0)) + 0.11),
+        Vec3(map_w_used * 0.5, map_d_used * 0.5, 0.11),
     )
-    _apply_boss_surface_style(game, ceiling, "ceiling", ceiling_tex, (0.96, 0.56, 1.0, 1.0))
-
-    for i in range(6):
-        angle = (math.tau / 6.0) * i
-        nx = math.cos(angle)
-        ny = math.sin(angle)
-        wall_pos = Vec3(nx * arena_radius, ny * arena_radius, wall_height * 0.5)
-        wall_h = math.degrees(angle) + 90.0
-        wall = game._add_box(
-            wall_pos,
-            Vec3(side_length * 0.52, wall_thickness, wall_height * 0.5),
-            color=(0.55, 1.0, 0.96, 1.0),
-            hpr=Vec3(wall_h, 0.0, 0.0),
-            parent=root,
-            collidable=False,
-        )
-        _apply_boss_surface_style(game, wall, "walls", wall_tex, (0.64, 1.0, 0.94, 1.0))
-
-    ceiling_world = center + Vec3(0.0, 0.0, wall_height + 0.72)
-    ceiling_collider = game._add_static_box_collider(
-        ceiling_world,
-        Vec3(arena_radius * 1.02, arena_radius * 1.02, 0.38),
-        hpr=None,
-        visual_holder=root,
+    bottom_collider = game._add_static_box_collider(
+        Vec3(center.x, center.y, float(getattr(game, "hyper_bounds_bottom_z", floor_y - 40.0)) - 0.11),
+        Vec3(map_w_used * 0.5, map_d_used * 0.5, 0.11),
     )
-    game.boss_room_arena_collider_nodes.append(ceiling_collider)
-
-    for i in range(6):
-        angle = (math.tau / 6.0) * i
-        nx = math.cos(angle)
-        ny = math.sin(angle)
-        wall_world = center + Vec3(nx * arena_radius, ny * arena_radius, wall_height * 0.5)
-        wall_h = math.degrees(angle) + 90.0
-        wall_collider = game._add_static_box_collider(
-            wall_world,
-            Vec3(side_length * 0.52, wall_thickness, wall_height * 0.5),
-            hpr=Vec3(wall_h, 0.0, 0.0),
-            visual_holder=root,
-        )
-        game.boss_room_arena_collider_nodes.append(wall_collider)
+    game.boss_room_arena_collider_nodes.append(top_collider)
+    game.boss_room_arena_collider_nodes.append(bottom_collider)
 
     game.boss_room_arena_center = Vec3(center)
-    game.boss_room_arena_radius = arena_radius
+    game.boss_room_arena_radius = arena_radius_max
+    game.boss_room_arena_scale = arena_scale
+
+    _build_boss_inverted_world(game, center, floor_y)
+
+
+def _build_boss_inverted_world(game: Any, center: Vec3, floor_y: float) -> None:
+    root = getattr(game, "boss_room_arena_root", None)
+    if root is None or root.isEmpty():
+        return
+    base_plane = float(getattr(game, "inverted_level_echo_plane_z", float(getattr(game, "floor_y", 0.0)) + 12.0))
+    extra_offset = float(getattr(game, "inverted_level_echo_extra_offset", 0.0))
+    opacity = float(getattr(game, "inverted_level_echo_opacity", 0.46))
+    boss_plane = base_plane + (floor_y - float(getattr(game, "floor_y", 0.0)))
+
+    inv_root = game.world.attachNewNode("boss-inverted-world")
+    inv_root.setPos(0.0, 0.0, 2.0 * boss_plane + extra_offset)
+    inv_root.setScale(1.0, 1.0, -1.0)
+    inv_root.setTransparency(TransparencyAttrib.MAlpha)
+    inv_root.setAlphaScale(opacity)
+    game.boss_room_inverted_root = inv_root
+
+    if getattr(game, "water_surface_shader", None) is not None:
+        inv_root.setShader(game.water_surface_shader)
+        inv_root.setShaderInput("u_room_tex", getattr(game, "level_checker_tex", None))
+        inv_root.setShaderInput("u_time", 0.0)
+        inv_root.setShaderInput("u_uv_scale", float(getattr(game, "room_thermal_uv_scale", 1.0)))
+        inv_root.setShaderInput("u_alpha", 0.5)
+        inv_root.setShaderInput("u_rainbow_strength", 0.0)
+        inv_root.setShaderInput("u_diffusion_strength", 0.0)
+        inv_root.setShaderInput("u_spec_strength", 0.0)
+        inv_root.setShaderInput("u_room_tex_strength", 0.0)
+        inv_root.setShaderInput("u_room_tex_desat", 1.0)
+        inv_root.setShaderInput("u_thermal_mode", 1.0)
+        inv_root.setShaderInput("u_thermal_strength", float(getattr(game, "room_thermal_strength", 1.0)))
+        inv_root.setShaderInput("u_compression_factor", 1.0)
+        inv_root.setShaderInput("u_compression_thermal_strength", 0.0)
+        inv_root.setShaderInput("u_density_contrast", float(getattr(game, "room_thermal_density_contrast", 1.35)))
+        inv_root.setShaderInput("u_density_gamma", float(getattr(game, "room_thermal_density_gamma", 0.85)))
+        inv_root.setShaderInput("u_static_uv", 1.0)
+        fog = getattr(game, "fog", None)
+        if fog is not None:
+            fog_color = fog.getColor()
+            fog_start = float(getattr(game, "fog_start", 1.0e6))
+            fog_end = float(getattr(game, "fog_end", 1.0e6 + 1.0))
+        else:
+            fog_color = (0.0, 0.0, 0.0, 1.0)
+            fog_start, fog_end = (1.0e6, 1.0e6 + 1.0)
+        inv_root.setShaderInput("u_fog_color", (float(fog_color[0]), float(fog_color[1]), float(fog_color[2])))
+        inv_root.setShaderInput("u_fog_start", float(fog_start))
+        inv_root.setShaderInput("u_fog_end", float(fog_end))
+        reflection_tex = getattr(game, "water_reflection_tex", None)
+        if reflection_tex is None:
+            reflection_tex = getattr(game, "level_checker_tex", None)
+        inv_root.setShaderInput("u_reflection_tex", reflection_tex)
+        inv_root.setShaderInput("u_reflection_strength", 0.0)
+    else:
+        inv_root.setShaderOff(1)
+
+    try:
+        root.instanceTo(inv_root)
+    except Exception:
+        pass
 
 
 def update_boss_room_visuals(game: Any, dt: float) -> None:
@@ -315,6 +444,38 @@ def update_boss_room_visuals(game: Any, dt: float) -> None:
         node.setAlphaScale(1.0)
         node.setShaderInput("u_time", shader_time)
         node.setShaderInput("u_hyper_w", hyper_w)
+    _update_boss_platform_movers(game, float(dt))
+
+
+def _update_boss_platform_movers(game: Any, dt: float) -> None:
+    movers = list(getattr(game, "boss_room_platform_movers", []))
+    if not movers:
+        return
+    root = getattr(game, "boss_room_arena_root", None)
+    if root is None or root.isEmpty():
+        return
+    root_pos = root.getPos(game.render)
+    t = float(getattr(game, "roll_time", 0.0))
+    for mover in movers:
+        visual = mover.get("visual")
+        if visual is None or visual.isEmpty():
+            continue
+        base = Vec3(mover.get("base", Vec3(0.0, 0.0, 0.0)))
+        amp = float(mover.get("amp", 1.0))
+        speed = float(mover.get("speed", 1.0))
+        phase = float(mover.get("phase", 0.0))
+        kind = str(mover.get("kind", "vertical"))
+        if kind == "horizontal":
+            axis = Vec3(mover.get("axis", Vec3(1.0, 0.0, 0.0)))
+            offset = axis * (math.sin(t * speed + phase) * amp)
+        else:
+            offset = Vec3(0.0, 0.0, math.sin(t * speed + phase) * amp)
+        target_local = base + offset
+        visual.setPos(target_local)
+
+        body_np = mover.get("body_np")
+        if body_np is not None and not body_np.isEmpty():
+            body_np.setPos(root_pos + target_local)
 
 
 def choose_boss_room_index(game: Any) -> int:
@@ -358,29 +519,60 @@ def begin_boss_room_encounter(game: Any) -> None:
         float(getattr(game, "hyper_bounds_top_z", game.floor_y + 40.0)) + 160.0,
     )
     boss_spawn = Vec3(isolated_center)
+    boss_floor_y = boss_spawn.z - 2.0
+    loop_half = max(10.0, float(getattr(game, "platform_loop_range", 16.0)) * 0.85 * 0.62)
+    game.boss_room_prev_hyper_bounds_top_z = float(getattr(game, "hyper_bounds_top_z", boss_floor_y + loop_half))
+    game.boss_room_prev_hyper_bounds_bottom_z = float(getattr(game, "hyper_bounds_bottom_z", boss_floor_y - loop_half))
+    game.hyper_bounds_bottom_z = boss_floor_y - loop_half
+    game.hyper_bounds_top_z = boss_floor_y + loop_half
     _build_hex_boss_arena(game, boss_room_idx, boss_spawn)
+    hub_pos = Vec3(getattr(game, "boss_room_hub_pos", boss_spawn + Vec3(0.0, 0.0, 2.6)))
+    hub_half = Vec3(getattr(game, "boss_room_hub_half", Vec3(6.0, 6.0, 0.7)))
+    hub_top_z = hub_pos.z + hub_half.z + 1.6
+    boss_offset = max(1.2, hub_half.y * 0.6)
+    boss_spawn_pos = Vec3(hub_pos.x, hub_pos.y + boss_offset, hub_top_z)
+    player_spawn_pos = Vec3(hub_pos.x, hub_pos.y - boss_offset, hub_top_z)
+
+    remote_players = getattr(game, "remote_players", None)
+    if isinstance(remote_players, dict) and remote_players:
+        ring_radius = max(1.6, hub_half.y * 0.9)
+        step = math.tau / max(1, len(remote_players))
+        for idx, entry in enumerate(remote_players.values()):
+            if not isinstance(entry, dict):
+                continue
+            angle = step * idx
+            entry["boss_warp_pos"] = Vec3(
+                hub_pos.x + math.cos(angle) * ring_radius,
+                hub_pos.y + math.sin(angle) * ring_radius,
+                hub_top_z,
+            )
+
     for monster in game.monsters:
         root = monster.get("root")
         if root is not None and not root.isEmpty():
-            root.setPos(boss_spawn + Vec3(random.uniform(-0.45, 0.45), random.uniform(-0.45, 0.45), 0.0))
+            root.setPos(boss_spawn_pos)
             monster["prev_pos"] = Vec3(root.getPos())
+            monster["base_z"] = float(boss_spawn_pos.z)
+            monster["jump_vel"] = 0.0
         monster["room_idx"] = boss_room_idx
         monster["level"] = min(int(getattr(game, "monster_level_cap", 150)), max(1, int(getattr(game, "monster_level_current", 1)) + 7))
         monster["boss_orbit_phase"] = random.uniform(0.0, math.tau)
-        monster["boss_burst_timer"] = random.uniform(0.35, 0.8)
+        monster["boss_burst_timer"] = random.uniform(0.2, 0.5)
         game._apply_monster_progression_stats(monster, boss_mode=True)
-        monster["hp_max"] = float(monster.get("hp_max", 1.0)) * 3.5
+        monster["hp_max"] = float(monster.get("hp_max", 1.0)) * 2.6
         monster["hp"] = float(monster.get("hp_max", 1.0))
-        monster["defense"] = max(0.35, float(monster.get("defense", 1.0)) * 1.6)
-        monster["attack_mult"] = float(monster.get("attack_mult", 1.0)) * 2.2
+        monster["defense"] = max(0.35, float(monster.get("defense", 1.0)) * 1.2)
+        monster["attack_mult"] = float(monster.get("attack_mult", 1.0)) * 2.8
+        monster["speed_boost"] = max(1.0, float(monster.get("speed_boost", 1.0)) * 1.45)
+        monster["ai_hunt_range"] = float(monster.get("ai_hunt_range", 11.5)) * 1.45
+        monster["ai_attack_range"] = float(monster.get("ai_attack_range", 2.0)) * 1.35
+        monster["ai_guard_range"] = float(monster.get("ai_guard_range", 17.0)) * 1.35
         vel = Vec3(monster.get("velocity", Vec3(0.0, 0.0, 0.0)))
         if vel.lengthSquared() > 1e-8:
-            monster["velocity"] = vel * 1.4
+            monster["velocity"] = vel * 1.9
 
     if hasattr(game, "ball_np") and game.ball_np is not None and (not game.ball_np.isEmpty()):
-        player_spawn = game._safe_room_spawn_pos(boss_room_idx, z_lift=0.34)
-        player_spawn += Vec3(0.0, -max(1.8, game.sword_reach * 1.1), 0.0)
-        game.ball_np.setPos(player_spawn)
+        game.ball_np.setPos(player_spawn_pos)
         if hasattr(game, "ball_body") and game.ball_body is not None:
             game.ball_body.setLinearVelocity(Vec3(0, 0, 0))
             game.ball_body.setAngularVelocity(Vec3(0, 0, 0))
