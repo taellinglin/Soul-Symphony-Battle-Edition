@@ -856,6 +856,8 @@ class SoulSymphony(ShowBase):
         self.monster_ai_jump_gravity = 12.0
         self.monster_ai_jump_cooldown_duration = 0.9
         self.sfx_water_loop = None
+        self.sfx_water_loop_lowpass = None
+        self.sfx_water_loop_reverb = None
         self.water_loop_active = False
         self.exp_orbs: list[dict] = []
         self.exp_orb_serial = 0
@@ -1151,6 +1153,28 @@ class SoulSymphony(ShowBase):
             "sfx/water",
             "sfx/water_loop",
         ])
+        self.sfx_water_loop_lowpass = self._load_first_sfx_2d([
+            "water_lowpass",
+            "water_lp",
+            "water_muffled",
+            "soundfx/water_lowpass",
+            "soundfx/water_lp",
+            "soundfx/water_muffled",
+            "sfx/water_lowpass",
+            "sfx/water_lp",
+            "sfx/water_muffled",
+        ])
+        self.sfx_water_loop_reverb = self._load_first_sfx_2d([
+            "water_reverb",
+            "water_verb",
+            "water_wet",
+            "soundfx/water_reverb",
+            "soundfx/water_verb",
+            "soundfx/water_wet",
+            "sfx/water_reverb",
+            "sfx/water_verb",
+            "sfx/water_wet",
+        ])
         self.sfx_attack = self._load_first_sfx_2d([
             "attack",
             "soundfx/attack",
@@ -1236,13 +1260,6 @@ class SoulSymphony(ShowBase):
             self.audio3d.setSoundMaxDistance(self.sfx_jump, 85.0)
             if hasattr(self.audio3d, "setSoundVelocityAuto"):
                 self.audio3d.setSoundVelocityAuto(self.sfx_jump)
-        if self.sfx_water_loop:
-            self.audio3d.attachSoundToObject(self.sfx_water_loop, self.ball_np)
-            self.audio3d.setSoundMinDistance(self.sfx_water_loop, 1.0)
-            self.audio3d.setSoundMaxDistance(self.sfx_water_loop, 95.0)
-            if hasattr(self.audio3d, "setSoundVelocityAuto"):
-                self.audio3d.setSoundVelocityAuto(self.sfx_water_loop)
-
         if self.sfx_roll:
             self.sfx_roll.setLoop(True)
             self.sfx_roll.setVolume(0.0)
@@ -4639,19 +4656,24 @@ class SoulSymphony(ShowBase):
         self.ball_body.setLinearVelocity(v_planar + up * v_up)
 
     def _stop_water_loop_sfx(self) -> None:
-        sfx = getattr(self, "sfx_water_loop", None)
-        if sfx is None:
-            return
         if self.water_loop_active:
-            try:
-                sfx.stop()
-            except Exception:
-                pass
+            for sfx in (
+                getattr(self, "sfx_water_loop", None),
+                getattr(self, "sfx_water_loop_lowpass", None),
+                getattr(self, "sfx_water_loop_reverb", None),
+            ):
+                if sfx is None:
+                    continue
+                try:
+                    sfx.stop()
+                except Exception:
+                    pass
         self.water_loop_active = False
 
     def _update_water_loop_sfx(self, dt: float) -> None:
-        sfx = getattr(self, "sfx_water_loop", None)
-        if sfx is None or not hasattr(self, "ball_np"):
+        sfx_main = getattr(self, "sfx_water_loop_lowpass", None) or getattr(self, "sfx_water_loop", None)
+        sfx_reverb = getattr(self, "sfx_water_loop_reverb", None)
+        if (sfx_main is None and sfx_reverb is None) or not hasattr(self, "ball_np"):
             self._stop_water_loop_sfx()
             return
         if not self.water_surfaces:
@@ -4677,16 +4699,25 @@ class SoulSymphony(ShowBase):
             speed = 0.0
 
         submerge = self._clamp(depth / max(0.1, self.ball_radius * 1.6), 0.0, 1.4)
-        norm = self._clamp(speed / 12.0, 0.0, 1.0)
-        rate = 0.75 + 1.05 * norm
-        vol = (0.08 + 0.22 * norm) * (0.4 + 0.6 * submerge)
+        norm = self._clamp(speed / 10.0, 0.0, 1.0)
+        norm_log = math.log1p(norm * 9.0) / math.log(10.0)
+        rate = (0.6 + 1.6 * norm_log) * 0.5
+        vol = (0.14 + 0.34 * norm) * (0.5 + 0.7 * submerge)
 
         try:
-            sfx.setLoop(True)
-            sfx.setPlayRate(rate)
-            sfx.setVolume(max(0.0, min(0.7, vol)))
+            if sfx_main is not None:
+                sfx_main.setLoop(True)
+                sfx_main.setPlayRate(rate)
+                sfx_main.setVolume(max(0.0, min(1.0, vol)))
+            if sfx_reverb is not None:
+                sfx_reverb.setLoop(True)
+                sfx_reverb.setPlayRate(max(0.5, min(2.4, rate * 0.98)))
+                sfx_reverb.setVolume(max(0.0, min(1.0, vol * 0.45)))
             if not self.water_loop_active:
-                sfx.play()
+                if sfx_main is not None:
+                    sfx_main.play()
+                if sfx_reverb is not None:
+                    sfx_reverb.play()
                 self.water_loop_active = True
         except Exception:
             self.water_loop_active = False
@@ -4745,6 +4776,10 @@ class SoulSymphony(ShowBase):
         node.setShaderInput("u_fog_color", (float(fog_color[0]), float(fog_color[1]), float(fog_color[2])))
         node.setShaderInput("u_fog_start", float(fog_start))
         node.setShaderInput("u_fog_end", float(fog_end))
+        reflection_tex = getattr(self, "water_reflection_tex", None)
+        if reflection_tex is None:
+            reflection_tex = self.level_checker_tex
+        node.setShaderInput("u_reflection_tex", reflection_tex)
         node.setShaderInput("u_reflection_strength", 0.0)
         if node not in self.room_thermal_shader_nodes:
             self.room_thermal_shader_nodes.append(node)
@@ -8662,6 +8697,10 @@ class SoulSymphony(ShowBase):
             root.setShaderInput("u_fog_color", (float(fog_color[0]), float(fog_color[1]), float(fog_color[2])))
             root.setShaderInput("u_fog_start", float(fog_start))
             root.setShaderInput("u_fog_end", float(fog_end))
+            reflection_tex = getattr(self, "water_reflection_tex", None)
+            if reflection_tex is None:
+                reflection_tex = self.level_checker_tex
+            root.setShaderInput("u_reflection_tex", reflection_tex)
             root.setShaderInput("u_reflection_strength", 0.0)
         else:
             root.setShaderOff(1)
@@ -8678,6 +8717,13 @@ class SoulSymphony(ShowBase):
         self.water_reflection_tex = None
         self.water_reflection_buf = None
         self.water_reflection_cam = None
+        reflect_tex = self._get_cached_texture("graphics/water/reflect.png")
+        if reflect_tex is not None:
+            self.water_reflection_tex = reflect_tex
+            if not getattr(self, "_water_reflection_logged", False):
+                print("[water] Reflection texture loaded: graphics/water/reflect.png")
+                self._water_reflection_logged = True
+            return
         if self.win is None or self.camLens is None:
             return
         try:
