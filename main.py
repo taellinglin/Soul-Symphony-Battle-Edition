@@ -3,6 +3,8 @@ import os
 import random
 import colorsys
 import sys
+import socket
+import subprocess
 try:
     import ctypes
 except Exception:
@@ -14,6 +16,8 @@ import wave
 import struct
 import threading
 import queue
+import json
+import uuid
 from collections import deque
 
 from direct.showbase.ShowBase import ShowBase
@@ -21,6 +25,8 @@ from direct.showbase.ShowBaseGlobal import globalClock
 from direct.showbase import Audio3DManager
 from direct.filter.CommonFilters import CommonFilters
 from direct.filter.FilterManager import FilterManager
+from direct.gui.DirectGui import DirectButton, DirectEntry, DirectFrame, DirectLabel
+from direct.gui import DirectGuiGlobals as DGG
 try:
     from panda3d.ai import AICharacter, AIWorld
 except Exception:
@@ -188,6 +194,11 @@ class SoulSymphony(ShowBase):
 
         self.disableMouse()
         self.accept("window-event", self._on_window_event)
+
+        self.ui_font = self.loader.loadFont("font/Mine.ttf")
+        if self.ui_font is not None:
+            TextNode.setDefaultFont(self.ui_font)
+            DGG.setDefaultFont(self.ui_font)
 
         self.world = self.render.attachNewNode("world")
         self.physics_world = BulletWorld()
@@ -695,6 +706,7 @@ class SoulSymphony(ShowBase):
         self.mouse_look_sensitivity_y = 0.13
         self.mouse_look_smooth = 0.62
         self.mouse_look_invert_y = False
+        self.mouse_look_suspended = False
         self._mouse_turn_input = 0.0
         self._mouse_pitch_input = 0.0
         self._mouse_centered = False
@@ -772,6 +784,42 @@ class SoulSymphony(ShowBase):
         self.enemy_projectile_cooldown_min = 1.4
         self.enemy_projectile_cooldown_max = 2.8
         self.enemy_projectile_fire_chance = 0.45
+        self.network_menu_root: NodePath | None = None
+        self.network_menu_frame = None
+        self.network_host_entry = None
+        self.network_port_entry = None
+        self.network_display_name_entry = None
+        self.network_status_label = None
+        self.network_socket: socket.socket | None = None
+        self.network_server_process: subprocess.Popen | None = None
+        self.network_inbox: queue.Queue = queue.Queue()
+        self.network_recv_thread: threading.Thread | None = None
+        self.network_recv_running = False
+        self.remote_players: dict[str, dict] = {}
+        self.remote_player_speed = 6.5
+        self.network_display_name = "Player"
+        self.network_client_id = f"local-{uuid.uuid4().hex[:8]}"
+        self.network_send_interval = 0.08
+        self.network_send_timer = 0.0
+        self.network_is_host = False
+        self.network_monster_send_interval = 0.2
+        self.network_monster_send_timer = 0.0
+        self.network_remote_monsters: dict[int, dict] = {}
+        self.network_remote_monster_time: float | None = None
+        self.local_name_label_node: TextNode | None = None
+        self.local_name_label_np: NodePath | None = None
+        self.local_name_screen_offset_px = 50.0
+        self.local_overhead_root: NodePath | None = None
+        self.local_overhead_hp_fill: NodePath | None = None
+        self.local_overhead_xp_fill: NodePath | None = None
+        self.client_list_ui: NodePath | None = None
+        self.client_list_text_node: TextNode | None = None
+        self.client_list_update_timer = 0.0
+        self.client_list_update_interval = 0.2
+        self.network_debug_ui: NodePath | None = None
+        self.network_debug_text_node: TextNode | None = None
+        self.network_last_packet_time: float | None = None
+        self.network_menu_active = False
         self.enable_wave_respawn = True
         self.monster_wave_index = 1
         self.monster_wave_respawn_delay = 3.0
@@ -782,6 +830,22 @@ class SoulSymphony(ShowBase):
         self.monster_wave_speed_scale = 0.06
         self.monster_wave_defense_scale = 0.08
         self.monster_wave_attack_scale = 0.08
+        self.enable_boss_per_wave = True
+        self.monster_boss_pending = False
+        self.monster_boss_room_active = False
+        self.monster_boss_defeated = False
+        self.monster_boss_entry_delay = 1.6
+        self.monster_boss_entry_timer = 0.0
+        self.monster_boss_scale = 1.0
+        self.boss_arena_root: NodePath | None = None
+        self.boss_arena_water_tag = "boss_arena"
+        self.boss_arena_center = Vec3(0, 0, 0)
+        self.boss_arena_major_radius = 18.0
+        self.boss_arena_minor_radius = 6.0
+        self.boss_arena_wall_height = 8.0
+        self.boss_compression_base = 0.72
+        self.boss_compression_pulse = 0.12
+        self.boss_return_pos: Vec3 | None = None
         self.player_level = 1
         self.player_xp = 0.0
         self.player_xp_next = 12.0
@@ -1053,6 +1117,9 @@ class SoulSymphony(ShowBase):
         self._setup_holographic_map_ui()
         self._setup_game_over_ui()
         self._setup_win_ui()
+        self._setup_network_menu()
+        self._setup_client_list_ui()
+        self._setup_network_debug_ui()
         if self.enable_particles:
             self._setup_star_particles()
         if self.enable_gravity_particles:
@@ -1098,6 +1165,7 @@ class SoulSymphony(ShowBase):
         self.accept("1", self._toggle_performance_mode)
         self.accept("r", self._on_r_pressed)
         self.accept("r-up", self._on_r_released)
+        self.accept("h", self._toggle_network_menu)
         self.accept("t", self._toggle_water_thermal_debug)
         self.accept("escape", self._on_escape_pressed)
 
@@ -1241,6 +1309,7 @@ class SoulSymphony(ShowBase):
         self.bgm_track = None
         self.bgm_track_path = None
         self.bgm_volume = 0.3
+        self.bgm_mode = None
 
         if self.sfx_roll:
             self.audio3d.attachSoundToObject(self.sfx_roll, self.ball_np)
@@ -1264,7 +1333,7 @@ class SoulSymphony(ShowBase):
             self.sfx_roll.setLoop(True)
             self.sfx_roll.setVolume(0.0)
 
-        self._start_random_bgm_loop()
+        self._set_bgm_mode("normal")
 
         self._setup_timespace_tone()
 
@@ -2013,6 +2082,14 @@ class SoulSymphony(ShowBase):
         monster_ui = getattr(self, "monster_hud_ui", None)
         if monster_ui is not None and not monster_ui.isEmpty():
             monster_ui.setPos(right - (margin_x + 0.72), 0.0, top - (margin_y + 0.12))
+
+        client_list_ui = getattr(self, "client_list_ui", None)
+        if client_list_ui is not None and not client_list_ui.isEmpty():
+            client_list_ui.setPos(right - margin_x, 0.0, top - (margin_y + 0.48))
+
+        net_debug_ui = getattr(self, "network_debug_ui", None)
+        if net_debug_ui is not None and not net_debug_ui.isEmpty():
+            net_debug_ui.setPos(right - margin_x, 0.0, top - (margin_y + 0.36))
 
         input_ui = getattr(self, "input_hud_ui", None)
         if input_ui is not None and not input_ui.isEmpty():
@@ -3758,6 +3835,60 @@ class SoulSymphony(ShowBase):
                 full = os.path.join(root, name)
                 tracks.append(full.replace("\\", "/"))
         return tracks
+
+    def _resolve_bgm_named_track(self, stem: str) -> str | None:
+        stem_key = str(stem).strip().lower()
+        if not stem_key:
+            return None
+        tracks = self._collect_bgm_tracks()
+        for path in tracks:
+            base = os.path.splitext(os.path.basename(path))[0].lower()
+            if base == stem_key:
+                return path
+        return None
+
+    def _play_bgm_path(self, path: str | None) -> bool:
+        if not path:
+            return False
+        if path == getattr(self, "bgm_track_path", None) and self.bgm_track is not None:
+            return True
+        if self.bgm_track is not None:
+            try:
+                self.bgm_track.stop()
+            except Exception:
+                pass
+            self.bgm_track = None
+            self.bgm_track_path = None
+        try:
+            music = self.loader.loadMusic(path)
+        except Exception:
+            music = None
+        if not music:
+            return False
+        try:
+            music.setLoop(True)
+            music.setVolume(max(0.0, min(1.0, float(getattr(self, "bgm_volume", 0.48)))))
+            music.play()
+            self.bgm_track = music
+            self.bgm_track_path = path
+            return True
+        except Exception:
+            return False
+
+    def _set_bgm_mode(self, mode: str) -> None:
+        mode_key = str(mode).strip().lower()
+        if mode_key == getattr(self, "bgm_mode", None):
+            return
+        self.bgm_mode = mode_key
+        target_stem = "boss" if mode_key == "boss" else "soundtrack"
+        target_path = self._resolve_bgm_named_track(target_stem)
+        if target_path and self._play_bgm_path(target_path):
+            return
+        self._start_random_bgm_loop()
+
+    def _sync_bgm_state(self) -> None:
+        boss_active = bool(getattr(self, "monster_boss_room_active", False))
+        self._set_bgm_mode("boss" if boss_active else "normal")
 
     def _start_random_bgm_loop(self) -> None:
         tracks = self._collect_bgm_tracks()
@@ -5612,6 +5743,8 @@ class SoulSymphony(ShowBase):
         self.magic_missile_template = template
 
     def _on_r_pressed(self) -> None:
+        if bool(getattr(self, "network_menu_active", False)):
+            return
         self.input_hud_r_state = True
         self.input_hud_r_pulse = 1.0
         if getattr(self, "game_over_active", False) or getattr(self, "win_active", False):
@@ -5627,14 +5760,20 @@ class SoulSymphony(ShowBase):
             self.input_hud_mouse_state[button_name] = False
 
     def _on_mouse1_pressed(self) -> None:
+        if bool(getattr(self, "network_menu_active", False)):
+            return
         self.input_hud_mouse_state["mouse1"] = True
         self._trigger_throw_attack()
 
     def _on_mouse2_pressed(self) -> None:
+        if bool(getattr(self, "network_menu_active", False)):
+            return
         self.input_hud_mouse_state["mouse2"] = True
         self._trigger_hyperbomb()
 
     def _on_mouse3_pressed(self) -> None:
+        if bool(getattr(self, "network_menu_active", False)):
+            return
         self.input_hud_mouse_state["mouse3"] = True
         self._trigger_spin_attack()
 
@@ -5704,6 +5843,8 @@ class SoulSymphony(ShowBase):
                 }
             )
 
+
+        self._send_attack_event("rocket")
         self.magic_missile_cooldown = float(getattr(self, "magic_missile_cooldown_duration", 4.5))
         fire_sfx = self.sfx_attack_homingmissile if self.sfx_attack_homingmissile else self.sfx_attack
         self._play_sound(fire_sfx, volume=0.7, play_rate=1.25)
@@ -5920,7 +6061,8 @@ class SoulSymphony(ShowBase):
                 if root is not None and not root.isEmpty():
                     hit_dist = hit_radius + float(target.get("radius", 0.6))
                     if (root.getPos() - next_pos).length() <= hit_dist:
-                        self._damage_monster(target, damage)
+                        if self.network_socket is None or self.network_is_host:
+                            self._damage_monster(target, damage)
                         self._spawn_motion_trail(next_pos, scale=0.22, color=(0.42, 1.0, 0.95, 0.65), life=0.18, vel=Vec3(0, 0, 0), use_box=False)
                         node.removeNode()
                         continue
@@ -6015,6 +6157,7 @@ class SoulSymphony(ShowBase):
         self.hyperbomb_origin = self._get_hyperbomb_spawn_pos()
         self.hyperbomb_cooldown = self.hyperbomb_cooldown_duration
         self._play_hyperbomb_sfx(self.hyperbomb_origin)
+        self._send_attack_event("bomb")
 
     def _get_hyperbomb_spawn_pos(self) -> Vec3:
         if not hasattr(self, "ball_np") or self.ball_np is None or self.ball_np.isEmpty():
@@ -6209,6 +6352,8 @@ class SoulSymphony(ShowBase):
         self._apply_hyperbomb_monster_effects(dt)
 
     def _apply_hyperbomb_monster_effects(self, dt: float) -> None:
+        if self.network_socket is not None and not self.network_is_host:
+            return
         if not self.monsters:
             return
 
@@ -6657,6 +6802,7 @@ class SoulSymphony(ShowBase):
         if self.game_over_active:
             return
         trigger_swing_attack(self)
+        self._send_attack_event("swing")
 
     def _trigger_throw_attack(self) -> None:
         if self.game_over_active:
@@ -6667,6 +6813,7 @@ class SoulSymphony(ShowBase):
         if self.game_over_active:
             return
         trigger_spin_attack(self)
+        self._send_attack_event("spin")
 
     def _spawn_floating_text(
         self,
@@ -6753,7 +6900,7 @@ class SoulSymphony(ShowBase):
         label.setText("HP")
         label.setTextColor(0.95, 0.98, 1.0, 0.95)
         label_np = self.player_hp_ui.attachNewNode(label)
-        label_np.setPos(0.0, 0, 0.07)
+        label_np.setPos(0.0, 0, 0.055)
         label_np.setScale(0.05)
 
         self.player_hp_fill_root = fill_root
@@ -6763,11 +6910,11 @@ class SoulSymphony(ShowBase):
         self.player_hp_label_text_node = label
         self.player_hp_label_np = label_np
 
-        exp_bg = self._instance_quad(self.player_hp_ui, "player-xp-bg", (0.0, 0.55, -0.16, -0.11))
+        exp_bg = self._instance_quad(self.player_hp_ui, "player-xp-bg", (0.0, 0.55, -0.18, -0.13))
         exp_bg.setColor(0.04, 0.06, 0.09, 0.82)
         exp_bg.setTransparency(TransparencyAttrib.MAlpha)
 
-        exp_glow = self._instance_quad(self.player_hp_ui, "player-xp-glow", (-0.01, 0.56, -0.17, -0.10))
+        exp_glow = self._instance_quad(self.player_hp_ui, "player-xp-glow", (-0.01, 0.56, -0.19, -0.12))
         exp_glow.setColor(0.25, 0.9, 1.0, 0.18)
         exp_glow.setTransparency(TransparencyAttrib.MAlpha)
         exp_glow.setDepthWrite(False)
@@ -6785,7 +6932,7 @@ class SoulSymphony(ShowBase):
 
         exp_fill_root = self.player_hp_ui.attachNewNode("player-xp-fill-root")
         exp_fill_root.setPos(0.01, 0.001, 0)
-        exp_fill = self._instance_quad(exp_fill_root, "player-xp-fill", (0.0, 0.53, -0.15, -0.12))
+        exp_fill = self._instance_quad(exp_fill_root, "player-xp-fill", (0.0, 0.53, -0.17, -0.14))
         exp_fill.setColor(0.28, 0.9, 1.0, 0.92)
         exp_fill.setTransparency(TransparencyAttrib.MAlpha)
 
@@ -6793,7 +6940,7 @@ class SoulSymphony(ShowBase):
         exp_label.setText("XP")
         exp_label.setTextColor(0.86, 0.96, 1.0, 0.92)
         exp_label_np = self.player_hp_ui.attachNewNode(exp_label)
-        exp_label_np.setPos(0.0, 0, -0.07)
+        exp_label_np.setPos(0.0, 0, -0.105)
         exp_label_np.setScale(0.045)
 
         self.player_xp_fill_root = exp_fill_root
@@ -6909,6 +7056,105 @@ class SoulSymphony(ShowBase):
 
         self.input_hud_ui = root
         self._layout_hud_to_corners()
+
+    def _setup_client_list_ui(self) -> None:
+        if self.client_list_ui is not None and not self.client_list_ui.isEmpty():
+            return
+        root = self.aspect2d.attachNewNode("client-list-ui")
+        root.setPos(1.24, 0.0, 0.85)
+        root.setBin("fixed", 112)
+        root.setDepthTest(False)
+        root.setDepthWrite(False)
+
+        panel = self._instance_quad(root, "client-list-panel", (-0.42, 0.02, -0.48, 0.06))
+        panel.setColor(0.02, 0.05, 0.08, 0.55)
+        panel.setTransparency(TransparencyAttrib.MAlpha)
+
+        label = TextNode("client-list-label")
+        label.setAlign(TextNode.ARight)
+        label.setTextColor(0.82, 0.95, 1.0, 0.95)
+        label_np = root.attachNewNode(label)
+        label_np.setPos(0.0, 0.0, 0.02)
+        label_np.setScale(0.035)
+
+        root.hide()
+        self.client_list_ui = root
+        self.client_list_text_node = label
+
+    def _setup_network_debug_ui(self) -> None:
+        if self.network_debug_ui is not None and not self.network_debug_ui.isEmpty():
+            return
+        root = self.aspect2d.attachNewNode("network-debug-ui")
+        root.setPos(1.24, 0.0, 0.97)
+        root.setBin("fixed", 113)
+        root.setDepthTest(False)
+        root.setDepthWrite(False)
+
+        label = TextNode("network-debug-label")
+        label.setAlign(TextNode.ARight)
+        label.setTextColor(0.75, 0.9, 1.0, 0.9)
+        label_np = root.attachNewNode(label)
+        label_np.setPos(0.0, 0.0, 0.0)
+        label_np.setScale(0.032)
+
+        root.hide()
+        self.network_debug_ui = root
+        self.network_debug_text_node = label
+
+    def _update_client_list_ui(self, dt: float) -> None:
+        if self.client_list_ui is None or self.client_list_ui.isEmpty():
+            return
+        self.client_list_update_timer -= dt
+        if self.client_list_update_timer > 0.0:
+            return
+        self.client_list_update_timer = float(getattr(self, "client_list_update_interval", 0.2))
+
+        active = self.network_socket is not None
+        if not active:
+            if not self.client_list_ui.isHidden():
+                self.client_list_ui.hide()
+            if self.network_debug_ui is not None and not self.network_debug_ui.isEmpty():
+                self.network_debug_ui.hide()
+            return
+        if self.client_list_ui.isHidden():
+            self.client_list_ui.show()
+        if self.network_debug_ui is not None and not self.network_debug_ui.isEmpty() and self.network_debug_ui.isHidden():
+            self.network_debug_ui.show()
+
+        lines = ["CLIENTS"]
+        local_name = self._get_network_display_name()
+        local_level = int(getattr(self, "player_level", 1))
+        local_hp = int(getattr(self, "player_hp", 1.0))
+        local_hp_max = int(getattr(self, "player_hp_max", 1.0))
+        local_xp = int(getattr(self, "player_xp", 0.0))
+        local_xp_next = int(getattr(self, "player_xp_next", 1.0))
+        lines.append(
+            f"{local_name}  Lv {local_level}  HP {local_hp}/{local_hp_max}  XP {local_xp}/{local_xp_next}"
+        )
+
+        for entry in self.remote_players.values():
+            display_name = str(entry.get("display_name") or "client")
+            level = max(1, int(entry.get("level", 1)))
+            hp = int(float(entry.get("hp", 1.0)))
+            hp_max = int(float(entry.get("hp_max", 1.0)))
+            xp = int(float(entry.get("xp", 0.0)))
+            xp_next = int(float(entry.get("xp_next", 1.0)))
+            lines.append(f"{display_name}  Lv {level}  HP {hp}/{hp_max}  XP {xp}/{xp_next}")
+
+        text_node = self.client_list_text_node
+        if isinstance(text_node, TextNode):
+            text_node.setText("\n".join(lines))
+
+        debug_node = self.network_debug_text_node
+        if isinstance(debug_node, TextNode):
+            remote_count = len(self.remote_players)
+            last_time = self.network_last_packet_time
+            if last_time is None:
+                age_text = "no packets"
+            else:
+                age = max(0.0, float(getattr(self, "roll_time", 0.0)) - float(last_time))
+                age_text = f"{age:.1f}s"
+            debug_node.setText(f"NET: {remote_count} | last: {age_text}")
 
     def _update_input_hud(self, dt: float) -> None:
         if not bool(getattr(self, "input_hud_enabled", True)):
@@ -7260,6 +7506,1062 @@ class SoulSymphony(ShowBase):
         root.hide()
         self.win_ui = root
 
+    def _setup_network_menu(self) -> None:
+        if self.network_menu_root is not None and not self.network_menu_root.isEmpty():
+            return
+        root = self.aspect2d.attachNewNode("network-menu")
+        root.setBin("fixed", 112)
+        root.setDepthTest(False)
+        root.setDepthWrite(False)
+
+        self.network_menu_frame = DirectFrame(
+            parent=root,
+            frameSize=(-0.6, 0.6, -0.34, 0.34),
+            frameColor=(0.02, 0.05, 0.08, 0.92),
+        )
+        DirectLabel(
+            parent=root,
+            text="NETWORK",
+            scale=0.07,
+            pos=(0.0, 0.0, 0.24),
+            text_font=self.ui_font,
+            text_fg=(0.6, 0.95, 1.0, 1.0),
+            frameColor=(0, 0, 0, 0),
+        )
+        DirectLabel(
+            parent=root,
+            text="Host",
+            scale=0.05,
+            pos=(-0.34, 0.0, 0.11),
+            text_font=self.ui_font,
+            text_fg=(0.9, 0.98, 1.0, 1.0),
+            frameColor=(0, 0, 0, 0),
+        )
+        DirectLabel(
+            parent=root,
+            text="Client",
+            scale=0.05,
+            pos=(-0.34, 0.0, -0.04),
+            text_font=self.ui_font,
+            text_fg=(0.9, 0.98, 1.0, 1.0),
+            frameColor=(0, 0, 0, 0),
+        )
+        DirectLabel(
+            parent=root,
+            text="Display Name",
+            scale=0.045,
+            pos=(-0.34, 0.0, -0.18),
+            text_font=self.ui_font,
+            text_fg=(0.9, 0.98, 1.0, 1.0),
+            frameColor=(0, 0, 0, 0),
+        )
+        self.network_host_entry = DirectEntry(
+            parent=root,
+            initialText="127.0.0.1",
+            numLines=1,
+            focus=0,
+            width=14,
+            scale=0.05,
+            pos=(-0.12, 0.0, -0.05),
+            frameColor=(0.08, 0.12, 0.16, 0.9),
+            text_font=self.ui_font,
+            text_fg=(0.9, 0.98, 1.0, 1.0),
+        )
+        self.network_port_entry = DirectEntry(
+            parent=root,
+            initialText="8383",
+            numLines=1,
+            focus=0,
+            width=6,
+            scale=0.05,
+            pos=(0.32, 0.0, -0.05),
+            frameColor=(0.08, 0.12, 0.16, 0.9),
+            text_font=self.ui_font,
+            text_fg=(0.9, 0.98, 1.0, 1.0),
+        )
+        self.network_display_name_entry = DirectEntry(
+            parent=root,
+            initialText=str(getattr(self, "network_display_name", "Player")),
+            numLines=1,
+            focus=0,
+            width=14,
+            scale=0.045,
+            pos=(-0.12, 0.0, -0.19),
+            frameColor=(0.08, 0.12, 0.16, 0.9),
+            text_font=self.ui_font,
+            text_fg=(0.9, 0.98, 1.0, 1.0),
+        )
+        DirectButton(
+            parent=root,
+            text="Host",
+            scale=0.06,
+            pos=(0.1, 0.0, 0.1),
+            text_font=self.ui_font,
+            command=self._on_host_pressed,
+        )
+        DirectButton(
+            parent=root,
+            text="Connect",
+            scale=0.06,
+            pos=(0.1, 0.0, -0.05),
+            text_font=self.ui_font,
+            command=self._on_connect_pressed,
+        )
+        self.network_status_label = DirectLabel(
+            parent=root,
+            text="Idle",
+            scale=0.045,
+            pos=(0.0, 0.0, -0.31),
+            text_font=self.ui_font,
+            text_fg=(0.7, 0.9, 1.0, 0.95),
+            frameColor=(0, 0, 0, 0),
+        )
+        root.hide()
+        self.network_menu_root = root
+
+    def _toggle_network_menu(self) -> None:
+        if self.network_menu_root is None or self.network_menu_root.isEmpty():
+            self._setup_network_menu()
+        if self.network_menu_root.isHidden():
+            self.network_menu_root.show()
+            self.network_menu_active = True
+            self.mouse_look_suspended = True
+            if self.network_display_name_entry is not None:
+                try:
+                    self.network_display_name_entry["focus"] = 1
+                except Exception:
+                    pass
+            props = WindowProperties()
+            props.setCursorHidden(False)
+            props.setMouseMode(WindowProperties.M_absolute)
+            self.win.requestProperties(props)
+        else:
+            self.network_menu_root.hide()
+            self.network_menu_active = False
+            self.mouse_look_suspended = False
+            if self.network_display_name_entry is not None:
+                try:
+                    self.network_display_name_entry["focus"] = 0
+                except Exception:
+                    pass
+            props = WindowProperties()
+            props.setCursorHidden(True)
+            props.setMouseMode(WindowProperties.M_relative)
+            self.win.requestProperties(props)
+
+    def _set_network_status(self, text: str, color: tuple[float, float, float, float] | None = None) -> None:
+        label = self.network_status_label
+        if label is None:
+            return
+        label["text"] = text
+        if color is not None:
+            label["text_fg"] = color
+
+    def _get_network_host_port(self) -> tuple[str, int] | None:
+        host_entry = self.network_host_entry
+        port_entry = self.network_port_entry
+        if host_entry is None or port_entry is None:
+            return None
+        host = str(host_entry.get()).strip()
+        port_raw = str(port_entry.get()).strip()
+        if not host:
+            host = "127.0.0.1"
+        try:
+            port = int(port_raw)
+        except Exception:
+            return None
+        if port <= 0 or port > 65535:
+            return None
+        return host, port
+
+    def _get_network_display_name(self) -> str:
+        entry = self.network_display_name_entry
+        if entry is None:
+            return str(getattr(self, "network_display_name", "Player"))
+        name = str(entry.get()).strip()
+        if not name:
+            name = str(getattr(self, "network_display_name", "Player"))
+        self.network_display_name = name
+        return name
+
+    def _on_host_pressed(self) -> None:
+        target = self._get_network_host_port()
+        if target is None:
+            self._set_network_status("Invalid host/port", (1.0, 0.4, 0.4, 1.0))
+            return
+        host, port = target
+        if self.network_server_process is None or self.network_server_process.poll() is not None:
+            server_path = os.path.abspath("server_app.py")
+            try:
+                self.network_server_process = subprocess.Popen([sys.executable, server_path, str(port)])
+                self._set_network_status("Hosting...", (0.6, 1.0, 0.7, 1.0))
+            except Exception:
+                self._set_network_status("Host launch failed", (1.0, 0.4, 0.4, 1.0))
+                return
+        self._connect_to_host(host, port, is_host=True)
+
+    def _on_connect_pressed(self) -> None:
+        target = self._get_network_host_port()
+        if target is None:
+            self._set_network_status("Invalid host/port", (1.0, 0.4, 0.4, 1.0))
+            return
+        host, port = target
+        self._connect_to_host(host, port, is_host=False)
+
+    def _connect_to_host(self, host: str, port: int, is_host: bool = False) -> None:
+        self._disconnect_network()
+        self.network_is_host = bool(is_host)
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2.0)
+            sock.connect((host, port))
+            sock.settimeout(0.1)
+            self.network_socket = sock
+            self.network_send_timer = 0.0
+            self._start_network_receiver()
+            self._ensure_local_name_label()
+            self._set_local_name_label_visible(True)
+            self._set_network_status(f"Connected to {host}:{port}", (0.6, 1.0, 0.7, 1.0))
+        except Exception:
+            self._set_network_status("Connect failed", (1.0, 0.4, 0.4, 1.0))
+            self._disconnect_network()
+
+    def _disconnect_network(self) -> None:
+        self.network_recv_running = False
+        recv_thread = self.network_recv_thread
+        self.network_recv_thread = None
+        sock = self.network_socket
+        self.network_socket = None
+        self.network_is_host = False
+        self.network_remote_monsters.clear()
+        self.network_remote_monster_time = None
+        if hasattr(self, "network_remote_attack_time"):
+            self.network_remote_attack_time.clear()
+        if hasattr(self, "network_remote_bomb_time"):
+            self.network_remote_bomb_time.clear()
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+        if recv_thread is not None and recv_thread.is_alive():
+            try:
+                recv_thread.join(timeout=0.1)
+            except Exception:
+                pass
+        self._remove_all_remote_players()
+        self._set_local_name_label_visible(False)
+
+    def _start_network_receiver(self) -> None:
+        if self.network_socket is None:
+            return
+        if self.network_recv_thread is not None and self.network_recv_thread.is_alive():
+            return
+        self.network_recv_running = True
+        self.network_recv_thread = threading.Thread(target=self._network_receiver_loop, daemon=True)
+        self.network_recv_thread.start()
+
+    def _network_receiver_loop(self) -> None:
+        sock = self.network_socket
+        if sock is None:
+            return
+        buffer = ""
+        while self.network_recv_running and self.network_socket is sock:
+            try:
+                data = sock.recv(4096)
+            except (BlockingIOError, socket.timeout):
+                continue
+            except Exception:
+                break
+            if not data:
+                break
+            try:
+                chunk = data.decode("utf-8", errors="ignore")
+            except Exception:
+                continue
+            buffer += chunk
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                self.network_inbox.put(line)
+        self.network_recv_running = False
+
+    def _process_network_messages(self) -> None:
+        processed = 0
+        while not self.network_inbox.empty() and processed < 120:
+            processed += 1
+            try:
+                raw = self.network_inbox.get_nowait()
+            except Exception:
+                break
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(msg, dict):
+                continue
+            msg_type = str(msg.get("type", ""))
+            if msg_type == "monsters":
+                if not self.network_is_host:
+                    self._store_remote_monster_snapshot(msg)
+                continue
+            if msg_type == "attack_event":
+                self._handle_remote_attack_event(msg, apply_damage=self.network_is_host)
+                continue
+            if msg_type != "input":
+                continue
+            client_id = str(msg.get("client", ""))
+            if not client_id:
+                continue
+            if client_id == getattr(self, "network_client_id", ""):
+                continue
+            move = msg.get("move", [0.0, 0.0])
+            if not isinstance(move, (list, tuple)) or len(move) < 2:
+                move = [0.0, 0.0]
+            try:
+                move_x = float(move[0])
+                move_y = float(move[1])
+            except Exception:
+                move_x, move_y = 0.0, 0.0
+            remote = self._ensure_remote_player(client_id)
+            remote["input"] = Vec2(move_x, move_y)
+            remote["last_update"] = float(getattr(self, "roll_time", 0.0))
+            self.network_last_packet_time = float(getattr(self, "roll_time", 0.0))
+            fwd = msg.get("fwd", [0.0, 0.0])
+            if isinstance(fwd, (list, tuple)) and len(fwd) >= 2:
+                try:
+                    fwd_x = float(fwd[0])
+                    fwd_y = float(fwd[1])
+                    remote["fwd"] = Vec2(fwd_x, fwd_y)
+                except Exception:
+                    pass
+            pos = msg.get("pos")
+            if isinstance(pos, (list, tuple)) and len(pos) >= 3:
+                try:
+                    remote["pos"] = Vec3(float(pos[0]), float(pos[1]), float(pos[2]))
+                    remote["has_pos"] = True
+                except Exception:
+                    remote["has_pos"] = False
+            display_name = msg.get("display_name") or msg.get("name")
+            if isinstance(display_name, str) and display_name.strip():
+                remote["display_name"] = display_name.strip()
+            if "level" in msg:
+                try:
+                    remote["level"] = max(1, int(msg.get("level")))
+                except Exception:
+                    pass
+            if "xp" in msg:
+                try:
+                    remote["xp"] = float(msg.get("xp"))
+                except Exception:
+                    pass
+            if "xp_next" in msg:
+                try:
+                    remote["xp_next"] = max(1.0, float(msg.get("xp_next")))
+                except Exception:
+                    pass
+            if "hp" in msg:
+                try:
+                    remote["hp"] = max(0.0, float(msg.get("hp")))
+                except Exception:
+                    pass
+            if "hp_max" in msg:
+                try:
+                    remote["hp_max"] = max(1.0, float(msg.get("hp_max")))
+                except Exception:
+                    pass
+            stats = msg.get("stats")
+            if isinstance(stats, dict):
+                remote["stats"] = stats
+
+    def _store_remote_monster_snapshot(self, msg: dict) -> None:
+        monsters = msg.get("monsters")
+        if not isinstance(monsters, list):
+            return
+        snapshot: dict[int, dict] = {}
+        for entry in monsters:
+            if not isinstance(entry, dict):
+                continue
+            idx = entry.get("idx")
+            try:
+                idx_val = int(idx)
+            except Exception:
+                continue
+            snapshot[idx_val] = entry
+        if snapshot:
+            self.network_remote_monsters = snapshot
+            self.network_remote_monster_time = float(getattr(self, "roll_time", 0.0))
+
+    def _send_monster_snapshot(self, dt: float) -> None:
+        sock = self.network_socket
+        if sock is None:
+            return
+        self.network_monster_send_timer += dt
+        interval = max(0.05, float(getattr(self, "network_monster_send_interval", 0.2)))
+        if self.network_monster_send_timer < interval:
+            return
+        self.network_monster_send_timer = 0.0
+        monsters: list[dict] = []
+        for idx, monster in enumerate(getattr(self, "monsters", [])):
+            root = monster.get("root")
+            if root is None or root.isEmpty():
+                continue
+            pos = root.getPos(self.render)
+            monsters.append(
+                {
+                    "idx": idx,
+                    "pos": [float(pos.x), float(pos.y), float(pos.z)],
+                    "hp": float(monster.get("hp", 0.0)),
+                    "hp_max": float(monster.get("hp_max", 1.0)),
+                    "dead": bool(monster.get("dead", False)),
+                }
+            )
+        payload = {
+            "type": "monsters",
+            "t": float(getattr(self, "roll_time", 0.0)),
+            "monsters": monsters,
+        }
+        try:
+            msg = (json.dumps(payload) + "\n").encode("utf-8")
+            sock.sendall(msg)
+        except Exception:
+            self._disconnect_network()
+
+    def _apply_remote_monster_snapshot(self) -> None:
+        if not self.network_remote_monsters:
+            return
+        for idx, monster in enumerate(getattr(self, "monsters", [])):
+            entry = self.network_remote_monsters.get(idx)
+            if not entry:
+                continue
+            root = monster.get("root")
+            if root is None or root.isEmpty():
+                continue
+            pos = entry.get("pos")
+            if isinstance(pos, (list, tuple)) and len(pos) >= 3:
+                try:
+                    root.setPos(float(pos[0]), float(pos[1]), float(pos[2]))
+                except Exception:
+                    pass
+            if "hp" in entry:
+                try:
+                    monster["hp"] = float(entry.get("hp"))
+                except Exception:
+                    pass
+            if "hp_max" in entry:
+                try:
+                    monster["hp_max"] = float(entry.get("hp_max"))
+                except Exception:
+                    pass
+            if "dead" in entry:
+                monster["dead"] = bool(entry.get("dead"))
+
+    def _handle_remote_attack_event(self, msg: dict, apply_damage: bool) -> None:
+        client_id = str(msg.get("client") or "").strip()
+        if not client_id:
+            return
+        if not hasattr(self, "network_remote_attack_time"):
+            self.network_remote_attack_time = {}
+        if not hasattr(self, "network_remote_bomb_time"):
+            self.network_remote_bomb_time = {}
+        entry = self.remote_players.get(client_id)
+        if entry is None:
+            return
+        kind = str(msg.get("kind") or "").lower()
+        now = float(getattr(self, "roll_time", 0.0))
+        msg_pos = msg.get("pos")
+        if isinstance(msg_pos, (list, tuple)) and len(msg_pos) >= 3:
+            try:
+                msg_pos_vec = Vec3(float(msg_pos[0]), float(msg_pos[1]), float(msg_pos[2]))
+            except Exception:
+                msg_pos_vec = None
+        else:
+            msg_pos_vec = None
+        msg_fwd = msg.get("fwd")
+        if isinstance(msg_fwd, (list, tuple)) and len(msg_fwd) >= 2:
+            try:
+                msg_fwd_vec = Vec2(float(msg_fwd[0]), float(msg_fwd[1]))
+            except Exception:
+                msg_fwd_vec = None
+        else:
+            msg_fwd_vec = None
+        if kind in {"swing", "spin"}:
+            key = f"{client_id}:{kind}"
+            last = float(self.network_remote_attack_time.get(key, -999.0))
+            min_cd = 0.08 if kind == "swing" else 0.15
+            if now - last < min_cd:
+                return
+            self.network_remote_attack_time[key] = now
+            src_pos = msg_pos_vec
+            if src_pos is None:
+                src_pos = entry.get("pos")
+            if not isinstance(src_pos, Vec3):
+                root = entry.get("root")
+                if root is None or root.isEmpty():
+                    return
+                src_pos = root.getPos(self.render)
+            fwd = msg_fwd_vec
+            if not isinstance(fwd, Vec2):
+                fwd = entry.get("fwd")
+            if not isinstance(fwd, Vec2):
+                fwd = Vec2(entry.get("input", Vec2(0.0, 1.0)))
+            if apply_damage:
+                self._apply_remote_sword_hits(Vec3(src_pos), Vec2(fwd), is_spin=(kind == "spin"))
+            self._spawn_remote_sword_slash(Vec3(src_pos), Vec2(fwd), is_spin=(kind == "spin"))
+        elif kind in {"bomb", "hyperbomb"}:
+            last = float(self.network_remote_bomb_time.get(client_id, -999.0))
+            min_cd = max(0.5, float(getattr(self, "hyperbomb_cooldown_duration", 1.75)))
+            if now - last < min_cd:
+                return
+            self.network_remote_bomb_time[client_id] = now
+            src_pos = msg_pos_vec
+            if src_pos is None:
+                src_pos = entry.get("pos")
+            if not isinstance(src_pos, Vec3):
+                root = entry.get("root")
+                if root is None or root.isEmpty():
+                    return
+                src_pos = root.getPos(self.render)
+            self._trigger_hyperbomb_at(Vec3(src_pos))
+        elif kind in {"rocket", "missile"}:
+            key = f"{client_id}:rocket"
+            last = float(self.network_remote_attack_time.get(key, -999.0))
+            min_cd = max(0.2, float(getattr(self, "magic_missile_cooldown_duration", 4.5)))
+            if now - last < min_cd:
+                return
+            self.network_remote_attack_time[key] = now
+            src_pos = msg_pos_vec
+            if src_pos is None:
+                src_pos = entry.get("pos")
+            if not isinstance(src_pos, Vec3):
+                root = entry.get("root")
+                if root is None or root.isEmpty():
+                    return
+                src_pos = root.getPos(self.render)
+            fwd = msg_fwd_vec
+            if not isinstance(fwd, Vec2):
+                fwd = entry.get("fwd")
+            if not isinstance(fwd, Vec2):
+                fwd = Vec2(entry.get("input", Vec2(0.0, 1.0)))
+            if apply_damage:
+                self._apply_remote_magic_missile_hits(Vec3(src_pos), Vec2(fwd))
+            self._spawn_remote_magic_missiles(Vec3(src_pos), Vec2(fwd))
+
+    def _apply_remote_sword_hits(self, source_pos: Vec3, forward: Vec2, is_spin: bool) -> None:
+        if not self.monsters:
+            return
+        swing_forward = Vec3(forward.x, forward.y, 0.0)
+        if swing_forward.lengthSquared() > 1e-6:
+            swing_forward.normalize()
+
+        reach_mult = max(0.6, float(getattr(self, "sword_reach_multiplier", 1.0)))
+        dmg_mult = max(0.5, float(getattr(self, "sword_damage_multiplier", 1.0)))
+        dmg_mult *= max(0.55, float(getattr(self, "combat_damage_multiplier", 1.0)))
+        base_damage = 54.0 if is_spin else 36.0
+        max_damage = 80.0 if is_spin else 60.0
+        damage = min(max_damage, base_damage * dmg_mult)
+
+        for monster in self.monsters:
+            if monster.get("dead", False):
+                continue
+            root = monster.get("root")
+            if root is None or root.isEmpty():
+                continue
+            to_monster = root.getPos() - source_pos
+            planar = Vec3(to_monster.x, to_monster.y, 0.0)
+            planar_dist = planar.length()
+            max_reach = self.sword_reach * reach_mult + float(monster.get("radius", 1.0)) * 0.65
+            if planar_dist > max_reach:
+                continue
+            if not is_spin:
+                if planar_dist < 1e-6 or swing_forward.lengthSquared() < 1e-6:
+                    continue
+                planar.normalize()
+                if planar.dot(swing_forward) < 0.12:
+                    continue
+            self._damage_monster_from(monster, damage, source_pos, swing_forward)
+
+    def _apply_remote_magic_missile_hits(self, source_pos: Vec3, forward: Vec2) -> None:
+        if not self.monsters:
+            return
+        targets = self._get_live_monster_targets()
+        if not targets:
+            return
+        count = max(1, int(getattr(self, "magic_missile_cast_count", 6)))
+        speed = max(1.0, float(getattr(self, "magic_missile_speed", 25.0)))
+        life = max(0.5, float(getattr(self, "magic_missile_life", 4.2)))
+        max_range = speed * life * 1.05
+        dmg_base = max(1.0, float(getattr(self, "magic_missile_damage", 34.0)))
+        dmg_cap = 52.0
+        dmg_mult = max(0.55, float(getattr(self, "combat_damage_multiplier", 1.0)))
+        damage = min(dmg_cap, dmg_base * dmg_mult)
+
+        fwd_vec = Vec3(forward.x, forward.y, 0.0)
+        if fwd_vec.lengthSquared() > 1e-6:
+            fwd_vec.normalize()
+
+        scored: list[tuple[float, dict]] = []
+        for monster in targets:
+            root = monster.get("root")
+            if root is None or root.isEmpty():
+                continue
+            dist = (root.getPos() - source_pos).length()
+            if dist > max_range:
+                continue
+            scored.append((dist, monster))
+
+        scored.sort(key=lambda item: item[0])
+        for _, monster in scored[:count]:
+            self._damage_monster_from(monster, damage, source_pos, fwd_vec)
+
+    def _spawn_remote_magic_missiles(self, source_pos: Vec3, forward: Vec2) -> None:
+        if self.magic_missile_template is None or self.magic_missile_template.isEmpty():
+            self._setup_magic_missile_visuals()
+        if self.magic_missile_template is None or self.magic_missile_template.isEmpty():
+            return
+        fwd = Vec3(forward.x, forward.y, 0.0)
+        if fwd.lengthSquared() < 1e-8:
+            fwd = Vec3(0.0, 1.0, 0.0)
+        else:
+            fwd.normalize()
+        up = self._get_gravity_up()
+        if up.lengthSquared() < 1e-8:
+            up = Vec3(0.0, 0.0, 1.0)
+        else:
+            up.normalize()
+        right = up.cross(fwd)
+        if right.lengthSquared() < 1e-8:
+            right = Vec3(1.0, 0.0, 0.0)
+        else:
+            right.normalize()
+
+        targets = self._get_live_monster_targets()
+        count = max(1, int(getattr(self, "magic_missile_cast_count", 6)))
+        speed = max(1.0, float(getattr(self, "magic_missile_speed", 25.0)))
+        cast_pos = Vec3(source_pos) + up * (self.ball_radius * 0.35)
+        for idx in range(count):
+            missile_np = self.magic_missile_template.copyTo(self.render)
+            missile_np.show()
+            spread = (idx - (count - 1) * 0.5)
+            spawn_pos = cast_pos + right * (spread * 0.55) + up * (0.16 * abs(spread))
+            missile_np.setPos(spawn_pos)
+
+            tgt = targets[idx % len(targets)] if targets else None
+            target_pos = tgt.get("root").getPos() if tgt and tgt.get("root") is not None else (spawn_pos + fwd * 6.0)
+            dir_vec = target_pos - spawn_pos
+            if dir_vec.lengthSquared() < 1e-8:
+                dir_vec = Vec3(fwd)
+            else:
+                dir_vec.normalize()
+
+            phase = random.uniform(0.0, math.tau)
+            missile_np.lookAt(spawn_pos + dir_vec, up)
+            self.magic_missiles.append(
+                {
+                    "node": missile_np,
+                    "vel": dir_vec * speed,
+                    "age": 0.0,
+                    "life": float(getattr(self, "magic_missile_life", 4.2)),
+                    "target_ref": tgt,
+                    "retarget_timer": random.uniform(0.01, float(getattr(self, "magic_missile_retarget_interval", 0.12))),
+                    "trail_timer": random.uniform(0.0, float(getattr(self, "magic_missile_trail_emit_interval", 0.02))),
+                    "phase": phase,
+                    "launch_up": random.uniform(0.6, 0.95),
+                    "body": missile_np.find("**/mm-body"),
+                    "nose": missile_np.find("**/mm-nose"),
+                    "flare": missile_np.find("**/mm-flare"),
+                    "halo": missile_np.find("**/mm-halo"),
+                    "core": missile_np.find("**/mm-core"),
+                }
+            )
+
+    def _spawn_remote_sword_slash(self, source_pos: Vec3, forward: Vec2, is_spin: bool) -> None:
+        if not hasattr(self, "sword_slash_nodes"):
+            return
+        fwd = Vec3(forward.x, forward.y, 0.0)
+        if fwd.lengthSquared() < 1e-8:
+            fwd = Vec3(0.0, 1.0, 0.0)
+        else:
+            fwd.normalize()
+        seg_len = self.sword_reach * (1.15 if is_spin else 0.9)
+        center = source_pos + fwd * (seg_len * 0.4) + Vec3(0.0, 0.0, self.ball_radius * 0.35)
+        holder = self.render.attachNewNode("remote-sword-slash")
+        heading = math.degrees(math.atan2(-fwd.x, fwd.y))
+        holder.setPos(center)
+        holder.setHpr(heading, 0.0, 0.0)
+
+        trail = self.box_model.copyTo(holder)
+        trail.setPos(self.box_norm_offset)
+        trail.setScale(self.box_norm_scale)
+        trail.setScale(seg_len * 0.5, 0.04 * max(1.0, self.ball_radius), 0.012 * max(1.0, self.ball_radius))
+        trail.clearTexture()
+        trail.setLightOff(1)
+        trail.setTransparency(TransparencyAttrib.MAlpha)
+        trail.setDepthWrite(False)
+        trail.setBin("transparent", 31)
+        trail.setColor(0.24, 0.95, 1.0, 0.68)
+        trail.setShaderOff(1)
+
+        self.sword_slash_nodes.append({"node": holder, "age": 0.0, "life": 0.14})
+
+    def _trigger_hyperbomb_at(self, origin: Vec3) -> None:
+        if self.hyperbomb_cooldown > 0.0:
+            return
+        ball_r = max(0.05, float(getattr(self, "ball_radius", 0.68)))
+        self.hyperbomb_active = True
+        self.hyperbomb_timer = 0.0
+        self.hyperbomb_spawn_timer = 0.0
+        self.hyperbomb_scale_start = max(0.03, ball_r * float(getattr(self, "hyperbomb_scale_start_factor", 0.18)))
+        self.hyperbomb_max_scale = max(self.hyperbomb_scale_start * 1.25, ball_r * float(getattr(self, "hyperbomb_max_scale_factor", 6.0)))
+        self.hyperbomb_origin = Vec3(origin)
+        self.hyperbomb_cooldown = self.hyperbomb_cooldown_duration
+        self._play_hyperbomb_sfx(self.hyperbomb_origin)
+
+    def _ensure_remote_player(self, client_id: str) -> dict:
+        entry = self.remote_players.get(client_id)
+        if entry is not None:
+            return entry
+        root = self.render.attachNewNode(f"remote-player-{client_id}")
+        root.setPos(self.ball_np.getPos() + Vec3(random.uniform(-1.5, 1.5), random.uniform(-1.5, 1.5), 0.0))
+
+        ball_vis = self.sphere_model.copyTo(root)
+        ball_vis.setScale(self.ball_radius)
+        ball_vis.setColor(1.0, 1.0, 1.0, 1.0)
+        ball_vis.clearTexture()
+        ball_tex = self._load_ball_texture()
+        uv_scale, uv_u, uv_v = self._get_ball_uv_params(ball_tex)
+        ball_vis.setTexture(self.ball_tex_stage, ball_tex)
+        self._apply_ball_cube_projection(ball_vis, uv_scale=uv_scale, uv_offset_u=uv_u, uv_offset_v=uv_v)
+        ball_vis.setMaterial(self.ball_emissive_material, 1)
+        self._register_color_cycle(ball_vis, (1.0, 1.0, 1.0, 1.0), min_speed=0.07, max_speed=0.16)
+
+        hum_sfx = None
+        if hasattr(self, "audio3d") and self.audio3d is not None:
+            sfx_path = getattr(self, "sfx_monster_hum_path", None)
+            if sfx_path:
+                try:
+                    hum_sfx = self.audio3d.loadSfx(sfx_path)
+                except Exception:
+                    hum_sfx = None
+            if hum_sfx:
+                self.audio3d.attachSoundToObject(hum_sfx, root)
+                self.audio3d.setSoundMinDistance(hum_sfx, 3.5)
+                self.audio3d.setSoundMaxDistance(hum_sfx, 90.0)
+                if hasattr(self.audio3d, "setSoundVelocityAuto"):
+                    self.audio3d.setSoundVelocityAuto(hum_sfx)
+                hum_sfx.setLoop(True)
+                hum_sfx.setVolume(0.22)
+                hum_sfx.setPlayRate(1.0)
+                hum_sfx.play()
+
+        hud_root = root.attachNewNode("remote-hud")
+        hud_root.setPos(0.0, 0.0, self.ball_radius * 1.0)
+        hud_root.setBillboardAxis()
+        hud_root.setLightOff(1)
+        hud_root.setDepthWrite(False)
+        hud_root.setDepthTest(False)
+        hud_root.setBin("fixed", 160)
+
+        hp_bg = self._instance_quad(hud_root, "remote-hp-bg", (-0.22, 0.22, -0.014, 0.014))
+        hp_bg.setPos(0.0, 0.0, 0.02)
+        hp_bg.setColor(0.05, 0.07, 0.1, 0.86)
+        hp_bg.setTransparency(TransparencyAttrib.MAlpha)
+        hp_bg.setDepthWrite(False)
+        hp_bg.setDepthTest(False)
+        hp_bg.setBin("fixed", 160)
+
+        hp_fill_root = hud_root.attachNewNode("remote-hp-fill-root")
+        hp_fill_root.setPos(-0.216, 0.0, 0.02)
+        hp_fill = self._instance_quad(hp_fill_root, "remote-hp-fill", (0.0, 0.432, -0.01, 0.01))
+        hp_fill.setColor(0.95, 0.22, 0.22, 0.96)
+        hp_fill.setTransparency(TransparencyAttrib.MAlpha)
+        hp_fill.setDepthWrite(False)
+        hp_fill.setDepthTest(False)
+        hp_fill.setBin("fixed", 160)
+
+        xp_bg = self._instance_quad(hud_root, "remote-xp-bg", (-0.22, 0.22, -0.008, 0.008))
+        xp_bg.setPos(0.0, 0.0, -0.02)
+        xp_bg.setColor(0.04, 0.06, 0.09, 0.82)
+        xp_bg.setTransparency(TransparencyAttrib.MAlpha)
+        xp_bg.setDepthWrite(False)
+        xp_bg.setDepthTest(False)
+        xp_bg.setBin("fixed", 160)
+
+        xp_fill_root = hud_root.attachNewNode("remote-xp-fill-root")
+        xp_fill_root.setPos(-0.216, 0.0, -0.02)
+        xp_fill = self._instance_quad(xp_fill_root, "remote-xp-fill", (0.0, 0.432, -0.006, 0.006))
+        xp_fill.setColor(0.25, 0.92, 0.25, 0.92)
+        xp_fill.setTransparency(TransparencyAttrib.MAlpha)
+        xp_fill.setDepthWrite(False)
+        xp_fill.setDepthTest(False)
+        xp_fill.setBin("fixed", 160)
+
+        label = TextNode(f"remote-label-{client_id}")
+        label.setText(client_id)
+        label.setAlign(TextNode.ACenter)
+        label.setTextColor(0.75, 0.95, 1.0, 0.9)
+        label_np = hud_root.attachNewNode(label)
+        label_np.setPos(0.0, 0.0, 0.055)
+        label_np.setScale(0.24)
+        label_np.setDepthWrite(False)
+        label_np.setDepthTest(False)
+        label_np.setBin("fixed", 160)
+
+        entry = {
+            "root": root,
+            "visual": ball_vis,
+            "label": label,
+            "label_np": label_np,
+            "hp_fill": hp_fill_root,
+            "xp_fill": xp_fill_root,
+            "hum_sfx": hum_sfx,
+            "hp": float(self.player_hp_max),
+            "hp_max": float(self.player_hp_max),
+            "level": int(getattr(self, "player_level", 1)),
+            "xp": float(getattr(self, "player_xp", 0.0)),
+            "xp_next": float(getattr(self, "player_xp_next", 1.0)),
+            "stats": {
+                "attack": int(getattr(self, "player_attack_stat", 0)),
+                "defense": int(getattr(self, "player_defense_stat", 0)),
+                "dex": int(getattr(self, "player_dex_stat", 0)),
+                "sta": int(getattr(self, "player_sta_stat", 0)),
+                "int": int(getattr(self, "player_int_stat", 0)),
+            },
+            "input": Vec2(0.0, 0.0),
+            "last_update": float(getattr(self, "roll_time", 0.0)),
+        }
+        self.remote_players[client_id] = entry
+        return entry
+
+    def _update_remote_players(self, dt: float) -> None:
+        if not self.remote_players:
+            return
+        now = float(getattr(self, "roll_time", 0.0))
+        stale_limit = 8.0
+        for client_id, entry in list(self.remote_players.items()):
+            root = entry.get("root")
+            if root is None or root.isEmpty():
+                continue
+            if now - float(entry.get("last_update", 0.0)) > stale_limit:
+                hum = entry.get("hum_sfx")
+                if hum is not None:
+                    try:
+                        hum.stop()
+                    except Exception:
+                        pass
+                root.removeNode()
+                self.remote_players.pop(client_id, None)
+                continue
+            if bool(entry.get("has_pos", False)) and "pos" in entry:
+                target = Vec3(entry.get("pos"))
+                current = root.getPos()
+                blend = min(1.0, dt * 10.0)
+                root.setPos(current + (target - current) * blend)
+            else:
+                move = Vec2(entry.get("input", Vec2(0.0, 0.0)))
+                if move.lengthSquared() > 1.0:
+                    move.normalize()
+                pos = root.getPos()
+                pos.x += move.x * self.remote_player_speed * dt
+                pos.y += move.y * self.remote_player_speed * dt
+                pos.z = self.ball_radius + max(0.02, float(getattr(self, "floor_t", 0.02)) * 0.5) + float(getattr(self, "floor_y", 0.0))
+                root.setPos(pos)
+
+            hp = max(0.0, float(entry.get("hp", 1.0)))
+            hp_max = max(1.0, float(entry.get("hp_max", 1.0)))
+            hp_ratio = max(0.0, min(1.0, hp / hp_max))
+            hp_fill = entry.get("hp_fill")
+            if hp_fill is not None and not hp_fill.isEmpty():
+                hp_fill.setScale(hp_ratio, 1.0, 1.0)
+
+            xp = max(0.0, float(entry.get("xp", 0.0)))
+            xp_next = max(1.0, float(entry.get("xp_next", 1.0)))
+            xp_ratio = max(0.0, min(1.0, xp / xp_next))
+            xp_fill = entry.get("xp_fill")
+            if xp_fill is not None and not xp_fill.isEmpty():
+                xp_fill.setScale(xp_ratio, 1.0, 1.0)
+
+            level = max(1, int(entry.get("level", 1)))
+            label = entry.get("label")
+            if isinstance(label, TextNode):
+                display_name = str(entry.get("display_name") or client_id)
+                label.setText(display_name)
+
+    def _remove_all_remote_players(self) -> None:
+        for entry in list(self.remote_players.values()):
+            hum = entry.get("hum_sfx")
+            if hum is not None:
+                try:
+                    hum.stop()
+                except Exception:
+                    pass
+            root = entry.get("root")
+            if root is not None and not root.isEmpty():
+                root.removeNode()
+        self.remote_players = {}
+
+    def _ensure_local_name_label(self) -> None:
+        if not hasattr(self, "ball_np") or self.ball_np is None or self.ball_np.isEmpty():
+            return
+        name = self._get_network_display_name()
+        if self.local_overhead_root is None or self.local_overhead_root.isEmpty():
+            root = self.render.attachNewNode("local-overhead")
+            root.setBillboardAxis()
+            root.setLightOff(1)
+            root.setDepthWrite(False)
+            root.setDepthTest(False)
+            root.setBin("fixed", 160)
+
+            label = TextNode("local-player-label")
+            label.setAlign(TextNode.ACenter)
+            label.setTextColor(0.92, 0.98, 1.0, 0.95)
+            label_np = root.attachNewNode(label)
+            label_np.setPos(0.0, 0.0, 0.055)
+            label_np.setScale(0.26)
+
+            hp_bg = self._instance_quad(root, "local-hp-bg", (-0.22, 0.22, -0.014, 0.014))
+            hp_bg.setPos(0.0, 0.0, 0.02)
+            hp_bg.setColor(0.05, 0.07, 0.1, 0.86)
+            hp_bg.setTransparency(TransparencyAttrib.MAlpha)
+            hp_bg.setDepthWrite(False)
+            hp_bg.setDepthTest(False)
+            hp_bg.setBin("fixed", 160)
+
+            hp_fill_root = root.attachNewNode("local-hp-fill-root")
+            hp_fill_root.setPos(-0.216, 0.0, 0.02)
+            hp_fill = self._instance_quad(hp_fill_root, "local-hp-fill", (0.0, 0.432, -0.01, 0.01))
+            hp_fill.setColor(0.95, 0.22, 0.22, 0.96)
+            hp_fill.setTransparency(TransparencyAttrib.MAlpha)
+            hp_fill.setDepthWrite(False)
+            hp_fill.setDepthTest(False)
+            hp_fill.setBin("fixed", 160)
+
+            xp_bg = self._instance_quad(root, "local-xp-bg", (-0.22, 0.22, -0.008, 0.008))
+            xp_bg.setPos(0.0, 0.0, -0.02)
+            xp_bg.setColor(0.04, 0.06, 0.09, 0.82)
+            xp_bg.setTransparency(TransparencyAttrib.MAlpha)
+            xp_bg.setDepthWrite(False)
+            xp_bg.setDepthTest(False)
+            xp_bg.setBin("fixed", 160)
+
+            xp_fill_root = root.attachNewNode("local-xp-fill-root")
+            xp_fill_root.setPos(-0.216, 0.0, -0.02)
+            xp_fill = self._instance_quad(xp_fill_root, "local-xp-fill", (0.0, 0.432, -0.006, 0.006))
+            xp_fill.setColor(0.25, 0.92, 0.25, 0.92)
+            xp_fill.setTransparency(TransparencyAttrib.MAlpha)
+            xp_fill.setDepthWrite(False)
+            xp_fill.setDepthTest(False)
+            xp_fill.setBin("fixed", 160)
+
+            self.local_overhead_root = root
+            self.local_name_label_node = label
+            self.local_name_label_np = root
+            self.local_overhead_hp_fill = hp_fill_root
+            self.local_overhead_xp_fill = xp_fill_root
+        if self.local_name_label_node is not None:
+            self.local_name_label_node.setText(name)
+
+    def _set_local_name_label_visible(self, visible: bool) -> None:
+        label_np = self.local_overhead_root
+        if label_np is None or label_np.isEmpty():
+            return
+        if visible:
+            label_np.show()
+        else:
+            label_np.hide()
+
+    def _update_local_name_label_screen_pos(self) -> None:
+        root = self.local_overhead_root
+        if root is None or root.isEmpty():
+            return
+        if not hasattr(self, "ball_np") or self.ball_np is None or self.ball_np.isEmpty():
+            return
+        ball_pos = self.ball_np.getPos(self.render)
+        root.setPos(ball_pos + Vec3(0.0, 0.0, self.ball_radius * 1.15))
+        if root.isHidden():
+            root.show()
+
+        hp_fill = self.local_overhead_hp_fill
+        if hp_fill is not None and not hp_fill.isEmpty():
+            hp = max(0.0, float(getattr(self, "player_hp", 1.0)))
+            hp_max = max(1.0, float(getattr(self, "player_hp_max", 1.0)))
+            hp_fill.setScale(max(0.0, min(1.0, hp / hp_max)), 1.0, 1.0)
+        xp_fill = self.local_overhead_xp_fill
+        if xp_fill is not None and not xp_fill.isEmpty():
+            xp = max(0.0, float(getattr(self, "player_xp", 0.0)))
+            xp_next = max(1.0, float(getattr(self, "player_xp_next", 1.0)))
+            xp_fill.setScale(max(0.0, min(1.0, xp / xp_next)), 1.0, 1.0)
+
+    def _send_local_network_state(self, dt: float) -> None:
+        sock = self.network_socket
+        if sock is None:
+            return
+        self.network_send_timer += dt
+        interval = max(0.02, float(getattr(self, "network_send_interval", 0.08)))
+        if self.network_send_timer < interval:
+            return
+        self.network_send_timer = 0.0
+        name = self._get_network_display_name()
+        self._ensure_local_name_label()
+        fwd = Vec3(getattr(self, "weapon_forward", self.last_move_dir))
+        fwd_vec = Vec2(fwd.x, fwd.y)
+        if fwd_vec.lengthSquared() > 1e-6:
+            fwd_vec.normalize()
+        payload = {
+            "type": "input",
+            "client": str(getattr(self, "network_client_id", "local")),
+            "display_name": name,
+            "t": float(getattr(self, "roll_time", 0.0)),
+            "move": [float(self.last_move_dir.x), float(self.last_move_dir.y)],
+            "fwd": [float(fwd_vec.x), float(fwd_vec.y)],
+            "pos": [float(self.ball_np.getPos().x), float(self.ball_np.getPos().y), float(self.ball_np.getPos().z)],
+            "jump": False,
+            "attack": False,
+            "level": int(getattr(self, "player_level", 1)),
+            "xp": float(getattr(self, "player_xp", 0.0)),
+            "xp_next": float(getattr(self, "player_xp_next", 1.0)),
+            "hp": float(getattr(self, "player_hp", 1.0)),
+            "hp_max": float(getattr(self, "player_hp_max", 1.0)),
+            "stats": {
+                "attack": int(getattr(self, "player_attack_stat", 0)),
+                "defense": int(getattr(self, "player_defense_stat", 0)),
+                "dex": int(getattr(self, "player_dex_stat", 0)),
+                "sta": int(getattr(self, "player_sta_stat", 0)),
+                "int": int(getattr(self, "player_int_stat", 0)),
+            },
+        }
+        try:
+            msg = (json.dumps(payload) + "\n").encode("utf-8")
+            sock.sendall(msg)
+        except Exception:
+            self._disconnect_network()
+
+    def _send_attack_event(self, kind: str) -> None:
+        if self.network_socket is None or self.network_is_host:
+            return
+        if not hasattr(self, "ball_np") or self.ball_np is None or self.ball_np.isEmpty():
+            return
+        fwd = Vec3(getattr(self, "weapon_forward", self.last_move_dir))
+        fwd_vec = Vec2(fwd.x, fwd.y)
+        if fwd_vec.lengthSquared() > 1e-6:
+            fwd_vec.normalize()
+        pos = self.ball_np.getPos(self.render)
+        payload = {
+            "type": "attack_event",
+            "client": str(getattr(self, "network_client_id", "local")),
+            "kind": str(kind),
+            "t": float(getattr(self, "roll_time", 0.0)),
+            "pos": [float(pos.x), float(pos.y), float(pos.z)],
+            "fwd": [float(fwd_vec.x), float(fwd_vec.y)],
+        }
+        try:
+            msg = (json.dumps(payload) + "\n").encode("utf-8")
+            self.network_socket.sendall(msg)
+        except Exception:
+            self._disconnect_network()
+
     def _trigger_game_over(self) -> None:
         if self.game_over_active:
             return
@@ -7364,6 +8666,7 @@ class SoulSymphony(ShowBase):
     def _restart_after_game_over(self) -> None:
         if not getattr(self, "game_over_active", False) and not getattr(self, "win_active", False):
             return
+        self._disconnect_network()
         self.game_over_active = False
         self.win_active = False
         self._clear_magic_missiles()
@@ -8134,6 +9437,86 @@ class SoulSymphony(ShowBase):
                 monster["prev_pos"] = Vec3(root.getPos())
         self._play_sound(self.sfx_monster_hit, volume=0.5, play_rate=1.0 + random.uniform(-0.08, 0.08))
 
+    def _damage_monster_from(self, monster: dict, damage: float, source_pos: Vec3, fallback_dir: Vec3 | None = None) -> None:
+        if monster.get("dead", False):
+            return
+
+        state = str(monster.get("state", "wandering"))
+        guard_chance = 0.0
+        if state == "guarding":
+            guard_chance = 0.58
+        elif state == "attacking":
+            guard_chance = 0.2
+        variant = str(monster.get("variant", "normal"))
+        if variant in ("juggernaut", "vanguard"):
+            guard_chance += 0.18
+        guard_chance = max(0.0, min(0.9, guard_chance))
+        if guard_chance > 0.0 and random.random() < guard_chance:
+            root = monster.get("root")
+            if root is not None and not root.isEmpty():
+                self._spawn_floating_text(root.getPos() + Vec3(0, 0, 1.1), "GUARD", (0.36, 1.0, 0.85, 0.95), scale=0.22, life=0.45)
+            self._set_monster_state(monster, "guarding", announce=False)
+            self._play_sound(self.sfx_monster_guard, volume=0.6, play_rate=1.0 + random.uniform(-0.06, 0.04))
+            return
+
+        defense = max(0.35, float(monster.get("defense", 1.0)))
+        applied = max(1.0, float(damage) / defense)
+        monster["hp"] = max(0.0, monster["hp"] - applied)
+        hp_ratio = monster["hp"] / max(1e-6, monster["hp_max"])
+        fill = monster.get("hp_fill")
+        if fill is not None and not fill.isEmpty():
+            fill.setScale(hp_ratio, 1.0, 1.0)
+
+        root = monster.get("root")
+        if root is not None and not root.isEmpty():
+            self._spawn_floating_text(root.getPos() + Vec3(0, 0, 1.1), f"HP -{int(round(applied))}", (0.3, 0.7, 1.0, 1.0), scale=0.24, life=0.7)
+
+        if monster["hp"] <= 0.0:
+            monster["dead"] = True
+            self.monsters_slain += 1
+            self._update_monster_hud_ui()
+            if self.monsters_total > 0 and self.monsters_slain >= self.monsters_total:
+                self._handle_wave_clear()
+            xp_gain = 2.0 + float(monster.get("hp_max", self.monster_max_hp)) * 0.04
+            if variant in ("juggernaut", "vanguard"):
+                xp_gain *= 1.45
+            elif variant == "raider":
+                xp_gain *= 1.25
+            elif variant == "giant":
+                xp_gain *= 1.75
+            if root is not None and not root.isEmpty():
+                self._spawn_exp_orbs(root.getPos() + Vec3(0, 0, 0.45), xp_gain)
+            self._set_monster_state(monster, "dying", announce=True)
+            if not self._play_kill_sfx():
+                self._play_sound(self.sfx_monster_die, volume=0.88, play_rate=1.0)
+            self._grant_kill_protection()
+            hum = monster.get("hum_sfx")
+            if hum:
+                hum.stop()
+            monster["hum_active"] = False
+            root = monster.get("root")
+            if root is not None and not root.isEmpty():
+                if random.random() < 0.85:
+                    self._spawn_sword_powerup(root.getPos() + Vec3(0, 0, 0.35))
+                root.removeNode()
+            return
+
+        self._set_monster_state(monster, "hit", announce=True)
+        if bool(monster.get("docile_until_attacked", False)):
+            monster["awakened"] = True
+        if root is not None and not root.isEmpty():
+            away = root.getPos() - source_pos
+            away.z = 0.0
+            if away.lengthSquared() < 1e-8 and fallback_dir is not None:
+                away = Vec3(fallback_dir.x, fallback_dir.y, 0.0)
+            if away.lengthSquared() > 1e-8:
+                away.normalize()
+                knock_speed = min(9.5, 4.2 + applied * 0.08)
+                monster["knockback_vel"] = away * knock_speed + Vec3(0, 0, 0.55)
+                root.setPos(root.getPos() + away * 0.12)
+                monster["prev_pos"] = Vec3(root.getPos())
+        self._play_sound(self.sfx_monster_hit, volume=0.5, play_rate=1.0 + random.uniform(-0.08, 0.08))
+
     def _apply_attack_hits(self, is_spin: bool) -> None:
         apply_attack_hits(self, is_spin)
 
@@ -8434,12 +9817,18 @@ class SoulSymphony(ShowBase):
         self.vertical_movers = keep
 
     def _set_key(self, key: str, state: bool) -> None:
+        if bool(getattr(self, "network_menu_active", False)):
+            return
         self.keys[key] = state
 
     def _set_camera_key(self, key: str, state: bool) -> None:
+        if bool(getattr(self, "network_menu_active", False)):
+            return
         self.camera_keys[key] = state
 
     def _set_hyper_key(self, key: str, state: bool) -> None:
+        if bool(getattr(self, "network_menu_active", False)):
+            return
         self.hyper_keys[key] = state
 
     def _set_hyperspace_gravity_hold(self, state: bool) -> None:
@@ -8529,7 +9918,7 @@ class SoulSymphony(ShowBase):
         self._mouse_centered = True
 
     def _consume_mouse_look(self) -> tuple[float, float]:
-        if not self.enable_mouse_look or self.win is None:
+        if not self.enable_mouse_look or self.win is None or bool(getattr(self, "mouse_look_suspended", False)):
             return 0.0, 0.0
         if not self.mouseWatcherNode.hasMouse():
             self._mouse_centered = False
@@ -13445,6 +14834,7 @@ class SoulSymphony(ShowBase):
     def update(self, task):
         dt = globalClock.getDt()
         dt = min(dt, 1 / 30)
+        self._sync_bgm_state()
         self._update_water_reflection()
         self._update_infinite_world_goal(dt)
         self.monster_anim_tick += 1
@@ -13488,7 +14878,10 @@ class SoulSymphony(ShowBase):
             self._update_orbit_lights(self.roll_time)
             self._update_atmosphere_lights(self.roll_time)
             self.light_update_timer = self.light_update_interval
-        self._update_hypercube_monsters(dt)
+        if self.network_socket is not None and not self.network_is_host:
+            self._apply_remote_monster_snapshot()
+        else:
+            self._update_hypercube_monsters(dt)
         self._update_combat_stat_buffs(dt)
         self._update_weapon(dt)
         self.health_ui_update_timer -= dt
@@ -13496,6 +14889,7 @@ class SoulSymphony(ShowBase):
             self._update_monster_health_bars()
             self._update_player_health_ui()
             self._update_monster_hud_ui()
+            self._update_client_list_ui(dt)
             self.health_ui_update_timer = 1.0 / 20.0
         self._update_input_hud(dt)
         self._update_holographic_map_ui(dt)
@@ -13506,6 +14900,7 @@ class SoulSymphony(ShowBase):
             if hasattr(self, "ball_body") and self.ball_body is not None:
                 self.ball_body.setLinearVelocity(Vec3(0, 0, 0))
                 self.ball_body.setAngularVelocity(Vec3(0, 0, 0))
+            self._update_local_name_label_screen_pos()
             self.audio3d.update()
             return task.cont
 
@@ -13518,6 +14913,11 @@ class SoulSymphony(ShowBase):
         self._update_magic_missiles(dt)
         self._update_magic_missile_trails(dt)
         self._update_enemy_projectiles(dt)
+        self._process_network_messages()
+        self._update_remote_players(dt)
+        self._send_local_network_state(dt)
+        if self.network_socket is not None and self.network_is_host:
+            self._send_monster_snapshot(dt)
         if self.enable_particles and self.enable_motion_trails:
             self._update_motion_trails(dt)
         elif self.motion_trails:
@@ -14028,6 +15428,7 @@ class SoulSymphony(ShowBase):
                     self._update_ball_shadow()
                     self.shadow_update_timer = 1.0 / 16.0 if self.performance_mode else 1.0 / 24.0
             self._update_video_distortion(dt, horizontal_speed)
+            self._update_local_name_label_screen_pos()
             return task.cont
 
         ball_pos = self.ball_np.getPos()
@@ -14130,6 +15531,7 @@ class SoulSymphony(ShowBase):
                 self.shadow_update_timer = 1.0 / 16.0 if self.performance_mode else 1.0 / 24.0
         self._update_video_distortion(dt, planar_speed)
         self.camera.lookAt(target, gravity_up)
+        self._update_local_name_label_screen_pos()
 
         return task.cont
 

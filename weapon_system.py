@@ -303,6 +303,8 @@ def trigger_throw_attack(game) -> None:
 
 
 def apply_attack_hits(game, is_spin: bool) -> None:
+    if getattr(game, "network_socket", None) is not None and not bool(getattr(game, "network_is_host", False)):
+        return
     if not game.monsters:
         return
 
@@ -359,6 +361,8 @@ def apply_attack_hits(game, is_spin: bool) -> None:
 
 
 def _apply_throw_hits(game, sword_pos: Vec3, radius: float) -> None:
+    if getattr(game, "network_socket", None) is not None and not bool(getattr(game, "network_is_host", False)):
+        return
     if not game.monsters:
         return
 
