@@ -189,22 +189,10 @@ class SoulSymphony(ShowBase):
         self.disableMouse()
         self.accept("window-event", self._on_window_event)
 
-        if _env_flag("SOULSYM_FULLSCREEN", True) and self.win is not None:
-            try:
-                fw, fh = _detect_native_resolution()
-                props = WindowProperties()
-                props.setFullscreen(False)
-                props.setUndecorated(True)
-                props.setOrigin(0, 0)
-                props.setSize(int(fw), int(fh))
-                props.setFixedSize(True)
-                self.win.requestProperties(props)
-            except Exception:
-                pass
-
         self.world = self.render.attachNewNode("world")
         self.physics_world = BulletWorld()
         self.physics_world.setGravity(Vec3(0, 0, -9.62))
+
         self.group_level = BitMask32.bit(0)
         self.group_player = BitMask32.bit(1)
         self.mask_level_hits = self.group_player
@@ -223,20 +211,21 @@ class SoulSymphony(ShowBase):
         self.ripple_events: list[tuple[Vec3, float]] = []
         self.ripple_emit_timer = 0.0
         self.ripple_emit_interval = 0.26
-        self.ripple_speed = 3.5
-        self.ripple_width = 15.2
+        self.ripple_speed = 1.5
+        self.ripple_width = 1.52
         self.ripple_max_age = 1.8
         self.ripple_alpha_strength = 0.85
         self.motion_trails: list[dict] = []
         self.motion_trail_emit_timer = 0.0
         self.performance_mode = True
-        self.safe_render_mode = _env_flag("SOULSYM_SAFE_RENDER", True)
+        self.safe_render_mode = _env_flag("SOULSYM_SAFE_RENDER", False)
+        self.safe_render_mode = False
         self.enable_particles = False
-        self.enable_gravity_particles = False
+        self.enable_gravity_particles =False
         self.enable_motion_trails = False
         self.enable_video_distortion = _env_flag("SOULSYM_ENABLE_VIDEO_DISTORTION", True)
         self.enable_entrance_debug_overlay = _env_flag("SOULSYM_DEBUG_ENTRANCES", True)
-        self.enable_ripple_effect = True
+        self.enable_ripple_effect = False
         self.enable_dynamic_shadows = (not self.performance_mode) and (not self.safe_render_mode)
         self.enable_ball_shadow = not self.performance_mode
         self.enable_occlusion_outlines = (not self.performance_mode) and (not self.safe_render_mode)
@@ -248,7 +237,7 @@ class SoulSymphony(ShowBase):
         self.physics_substeps = 2 if self.performance_mode else 4
         self.physics_fixed_timestep = (1 / 120.0) if self.performance_mode else (1 / 180.0)
         self.video_distort_strength = 0.24
-        self.video_bloom_strength = 0.18
+        self.video_bloom_strength = 0.0
         self.video_bloom_radius = 0.9
         self.video_bloom_threshold = 0.52
         self.video_distort_compression_response = 1.25
@@ -268,15 +257,23 @@ class SoulSymphony(ShowBase):
         self.color_cycle_nodes: list[dict] = []
         self.color_cycle_time = 0.0
         self.color_cycle_update_timer = 0.0
-        self.texture_layer_cycle_enabled = True
-        self.texture_layer_scroll_u = 0.018
-        self.texture_layer_scroll_v = 0.013
+        self.enable_color_cycle = False
+        self.texture_layer_cycle_enabled = False
+        self.texture_layer_scroll_u = 0.18
+        self.texture_layer_scroll_v = 0.13
         self.texture_layer_fade_speed = 0.28
         self.texture_layer_alpha_min = 0.02
         self.texture_layer_alpha_max = 0.11
-        self.texture_layer_additive_gain = 0.42
+        self.texture_layer_additive_gain = 0.12
         self.single_texture_per_cube = True
-        self.force_single_opaque_additive_texture = True
+        self.force_single_opaque_additive_texture = False
+        self.disable_world_textures = _env_flag("SOULSYM_DISABLE_WORLD_TEXTURES", True)
+        self.single_world_water_texture_mode = _env_flag("SOULSYM_SINGLE_WORLD_WATER_TEXTURE", False)
+        self.single_room_texture_mode = _env_flag("SOULSYM_SINGLE_ROOM_TEXTURE", True)
+        self.apply_room_texture_to_water = False
+        self.single_water_texture_repeat = 100.0
+        self.single_platform_texture_repeat = 100.0
+        self.single_room_texture_repeat = 100.0
         self.cube_water_distort_strength = 0.185
         self.gravity_magnitude = 19.62
         self.gravity_blend_speed = 4.8
@@ -316,6 +313,7 @@ class SoulSymphony(ShowBase):
         self.max_room_texture_variants = 8 if self.performance_mode else 32
         self.room_texture_paths: list[str] = []
         self.active_room_texture_paths: list[str] = []
+        self.single_room_texture: Texture | None = None
         self.room_texture_vram_ratio = 0.25
         self.level_checker_tex = self._create_checker_texture(
             size=256,
@@ -323,46 +321,69 @@ class SoulSymphony(ShowBase):
             color_a=(0.0, 0.0, 0.0, 1.0),
             color_b=(0.0, 0.0, 0.0, 0.0),
         )
-        self.level_additive_stage = TextureStage("level-single-additive")
-        self.level_additive_stage.setMode(TextureStage.MAdd)
-        self.level_additive_stage.setSort(8)
-        add_gain = float(getattr(self, "texture_layer_additive_gain", 0.42))
-        self.level_additive_stage.setColor((add_gain, add_gain, add_gain, 1.0))
+        self.level_additive_stage = TextureStage.getDefault()
         self.floor_fractal_tex_a = self._create_fractal_symmetry_texture(size=256, symmetry=6, seed=0.37)
         self.floor_fractal_tex_b = self._create_fractal_symmetry_texture(size=256, symmetry=9, seed=0.81)
         self.water_base_tex = self._load_water_base_texture()
         self.water_specular_tex = self._create_water_specular_texture(size=256, seed=0.41)
         self.floor_wet_shader = self._load_floor_wet_shader()
-        self.water_surface_shader = None
+        self.water_surface_shader = self._load_water_surface_shader()
         self.floor_shader_nodes: list[NodePath] = []
         self.water_shader_nodes: list[NodePath] = []
+        self.room_thermal_shader_nodes: list[NodePath] = []
         self.floor_contact_uv = Vec2(0.0, 0.0)
         self.floor_contact_strength = 0.2
         self.floor_contact_decay = 3.6
         self.floor_uv_projection_scale = 30.0
-        self.animate_non_water_uv = True
-        self.water_overlay_min_area = 20.5
+        self.animate_non_water_uv = False
+        self.enable_floor_textures = False
+        self.water_overlay_min_area = 40.5
         self.water_level_offset = 0.0
-        self.water_surface_raise = 0.028
-        self.water_uv_repeat_scale = 32.0
-        self.room_floor_uv_repeat_scale = 100.0
+        self.water_surface_raise = 0.28
+        self.water_uv_repeat_scale = 1.0
+        self.water_texture_scroll_enabled = False
+        self.room_floor_uv_repeat_scale = 50.0
         self.water_wave_amplitude = 0.24
         self.water_wave_speed = 10.4
-        self.water_wave_freq_x = 0.09
-        self.water_wave_freq_y = 0.07
+        self.water_wave_freq_x = 0.9
+        self.water_wave_freq_y = 0.7
         self.water_specular_detail_repeat = 7.5
-        self.water_specular_strength = 0.72
+        self.water_specular_strength = 1.15
         self.water_specular_scroll_speed = 1.85
         self.water_additive_opacity_scale = 0.06
         self.water_additive_gain_scale = 0.08
-        self.water_rainbow_strength = 0.12
-        self.water_diffusion_strength = 0.38
-        self.water_color_cycle_enabled = True
+        self.water_rainbow_strength = 0.0
+        self.water_diffusion_strength = 0.0
+        self.water_room_tex_strength = 0.0
+        self.water_room_tex_desat = 0.15
+        self.water_compression_thermal_strength = 0.85
+        self.water_thermal_cycle_strength = 1.0
+        self.water_thermal_cycle_speed = 0.18
+        self.debug_force_water_thermal = False
+        self.enable_room_thermal = False
+        self.room_thermal_uv_scale = 1.0
+        self.room_thermal_strength = 1.0
+        self.room_thermal_compression_strength = 1.0
+        self.room_thermal_cycle_strength = 1.0
+        self.room_thermal_cycle_speed = 0.22
+        self.room_thermal_room_tex_strength = 0.0
+        self.room_thermal_room_tex_desat = 1.0
+        self.room_thermal_density_contrast = 1.35
+        self.room_thermal_density_gamma = 0.85
+        if self.enable_room_thermal and self.safe_render_mode:
+            self.safe_render_mode = False
+            self._setup_toon_rendering()
+        self.water_color_cycle_enabled = False
         self.water_color_cycle_speed = 5.8
         self.water_color_cycle_saturation = 0.92
         self.water_color_cycle_value = 1.0
-        self.water_color_cycle_alpha = 0.16
-        self.water_color_cycle_smoothness = 0.24
+        self.water_color_cycle_alpha = 0.2
+        self.water_color_cycle_smoothness = 0.08
+        self.water_static_uv = True
+        self.water_density_thermal_mode = True
+        self.water_density_thermal_strength = 1.0
+        self.water_density_contrast = 1.35
+        self.water_density_gamma = 0.85
         self.water_emissive_linux_enabled = sys.platform.startswith("linux") and _env_flag("SOULSYM_WATER_EMISSIVE_LINUX", False)
         self.water_emissive_linux_scale = 1.35
         self.water_buoyancy_bias = 0.62
@@ -371,6 +392,7 @@ class SoulSymphony(ShowBase):
         self.water_drag_vertical = 1.95
         self.water_loop_overscan = 6.0
         self.water_surfaces: list[dict] = []
+        self.water_room_tex_map: dict[int, Texture] = {}
         self.water_crystal_spawn_enabled = True
         self.water_crystal_spawn_interval = 0.42 if self.performance_mode else 0.24
         self.water_crystal_spawn_timer = 0.0
@@ -387,6 +409,8 @@ class SoulSymphony(ShowBase):
         if not self.lazy_vram_loading:
             self._prefetch_texture_assets()
         self.room_textures = self._load_room_textures()
+        if self.single_room_texture_mode:
+            self.single_room_texture = self._select_single_room_texture()
         room_fallback_tex = self._get_random_room_texture()
         if room_fallback_tex is not None:
             self.level_checker_tex = room_fallback_tex
@@ -452,17 +476,6 @@ class SoulSymphony(ShowBase):
             self.rooms, self.edges = generator.generate()
 
         self.room_levels = generated_levels if generated_levels is not None else {idx: 0 for idx in range(len(self.rooms))}
-        if len(self.rooms) < 2:
-            fallback_cell = int(max(24, min(48, avg_scaled * 0.95)))
-            if layout_mode == "hexmix":
-                self.rooms, self.edges = generator.generate_hex_mixed(cell_size=fallback_cell)
-            else:
-                self.rooms, self.edges = generator.generate_labyrinth(cell_size=fallback_cell)
-            self.room_levels = {idx: 0 for idx in range(len(self.rooms))}
-        if layout_mode in ("maze3d", "snake3d", "labyrinth", "hexmix"):
-            self._space_rooms_apart(min_gap=max(0.2, self.corridor_w * 0.04), iterations=3)
-        else:
-            self._space_rooms_apart(min_gap=max(1.4, self.corridor_w * 0.24), iterations=18)
 
         room_count = len(self.rooms)
         self._hyper_uv_update_interval_min = 0.0
@@ -987,6 +1000,7 @@ class SoulSymphony(ShowBase):
                 self.camLens.setFov(self.camera_fov_base)
             except Exception:
                 pass
+        self._setup_water_reflection()
         self._setup_mouse_look()
         self._setup_video_distortion()
         self._setup_player_health_ui()
@@ -1039,6 +1053,7 @@ class SoulSymphony(ShowBase):
         self.accept("1", self._toggle_performance_mode)
         self.accept("r", self._on_r_pressed)
         self.accept("r-up", self._on_r_released)
+        self.accept("t", self._toggle_water_thermal_debug)
         self.accept("escape", self._on_escape_pressed)
 
         self.sfx_roll = self._load_first_sfx([
@@ -1293,6 +1308,61 @@ class SoulSymphony(ShowBase):
             print("Scene analyze: skipped (set SOULSYM_VERBOSE_SCENE_STATS=1 to enable detailed analyze())")
         print("=== End Scene Graph Resource Summary ===\n")
 
+    def _print_active_shader_texture_list(self) -> None:
+        shader_counts: dict[str, int] = {}
+        texture_counts: dict[str, int] = {}
+
+        try:
+            geom_nodes = self.render.findAllMatches("**/+GeomNode")
+        except Exception:
+            geom_nodes = []
+
+        for node in geom_nodes:
+            shader_label = None
+            try:
+                shader_obj = node.getShader()
+            except Exception:
+                shader_obj = None
+            if shader_obj is not None:
+                try:
+                    shader_label = str(shader_obj)
+                except Exception:
+                    shader_label = "<shader>"
+            if shader_label:
+                shader_counts[shader_label] = shader_counts.get(shader_label, 0) + 1
+
+            try:
+                tex_collection = node.findAllTextures()
+                tex_count = int(tex_collection.getNumTextures())
+            except Exception:
+                tex_collection = None
+                tex_count = 0
+            for idx in range(tex_count):
+                tex_obj = tex_collection.getTexture(idx)
+                if tex_obj is None:
+                    continue
+                try:
+                    tex_label = tex_obj.getName() or str(tex_obj)
+                except Exception:
+                    tex_label = "<texture>"
+                texture_counts[tex_label] = texture_counts.get(tex_label, 0) + 1
+
+        print("\n=== Active Shaders / Textures (key 1) ===")
+        if shader_counts:
+            print(f"Shaders ({len(shader_counts)} unique):")
+            for name in sorted(shader_counts.keys()):
+                print(f"  - {name} x{shader_counts[name]}")
+        else:
+            print("Shaders: none")
+
+        if texture_counts:
+            print(f"Textures ({len(texture_counts)} unique):")
+            for name in sorted(texture_counts.keys()):
+                print(f"  - {name} x{texture_counts[name]}")
+        else:
+            print("Textures: none")
+        print("=== End Active Shaders / Textures ===\n")
+
     def _resolve_monster_hum_path(self) -> str | None:
         candidates = [
             "monsteridle.wav",
@@ -1509,7 +1579,9 @@ class SoulSymphony(ShowBase):
             self.camera_smoothed_pos = Vec3(self.camera.getPos(self.render))
         if hasattr(self, "fog") and self.fog is not None:
             self.fog.setColor(0.035, 0.045, 0.075)
-            self.fog.setLinearRange(6, 40)
+            self.fog.setLinearRange(1.2, 20.0)
+            self.fog_start = 1.2
+            self.fog_end = 20.0
         if hasattr(self, "ball_np"):
             ball_pos = self.ball_np.getPos()
             self.camera.setPos(self._clamp_camera_to_current_room_bounds(self.camera.getPos(), ball_pos))
@@ -1602,10 +1674,12 @@ class SoulSymphony(ShowBase):
         shader_vert = "graphics/shaders/water_surface.vert"
         shader_frag = "graphics/shaders/water_surface.frag"
         if not os.path.exists(shader_vert) or not os.path.exists(shader_frag):
+            print(f"[shader] Missing water surface shader files: {shader_vert}, {shader_frag}")
             return None
         try:
             return Shader.load(Shader.SL_GLSL, shader_vert, shader_frag)
         except Exception:
+            print("[shader] Failed to load water surface shader")
             return None
 
     def _update_floor_wet_shader_inputs(self, dt: float, grounded_contact: Vec3 | None, speed: float) -> None:
@@ -1628,7 +1702,8 @@ class SoulSymphony(ShowBase):
         for node in self.floor_shader_nodes:
             if node is None or node.isEmpty():
                 continue
-            node.setShaderInput("u_time", self.roll_time)
+            shader_time = self.roll_time if self.water_texture_scroll_enabled else 0.0
+            node.setShaderInput("u_time", shader_time)
             node.setShaderInput("u_contact_uv", self.floor_contact_uv)
             node.setShaderInput("u_wake_strength", self.floor_contact_strength)
             node.setShaderInput("u_room_uv_scale", self.floor_uv_projection_scale)
@@ -1641,9 +1716,45 @@ class SoulSymphony(ShowBase):
         keep: list[NodePath] = []
         uv_scale = max(0.2, float(getattr(self, "water_uv_repeat_scale", 1.0)))
         alpha = self._clamp(float(getattr(self, "water_color_cycle_alpha", 0.52)), 0.05, 1.0)
-        rainbow_strength = self._clamp(float(getattr(self, "water_rainbow_strength", 0.28)), 0.0, 2.0)
-        diffusion_strength = self._clamp(float(getattr(self, "water_diffusion_strength", 0.72)), 0.0, 2.0)
+        thermal_cycle_strength = self._clamp(float(getattr(self, "water_thermal_cycle_strength", 1.0)), 0.0, 1.0)
+        thermal_cycle_speed = max(0.0, float(getattr(self, "water_thermal_cycle_speed", 0.18)))
+        rainbow_strength = thermal_cycle_strength
+        diffusion_strength = thermal_cycle_speed
         spec_strength = self._clamp(float(getattr(self, "water_specular_strength", 0.72)), 0.0, 2.0)
+        room_tex_strength = self._clamp(float(getattr(self, "water_room_tex_strength", 0.32)), 0.0, 1.0)
+        room_tex_desat = self._clamp(float(getattr(self, "water_room_tex_desat", 0.85)), 0.0, 1.0)
+        thermal_mode = 1.0 if bool(getattr(self, "water_density_thermal_mode", True)) else 0.0
+        thermal_strength = self._clamp(float(getattr(self, "water_density_thermal_strength", 0.92)), 0.0, 1.0)
+        thermal_cycle_strength = self._clamp(float(getattr(self, "water_thermal_cycle_strength", 1.0)), 0.0, 1.0)
+        thermal_cycle_speed = max(0.0, float(getattr(self, "water_thermal_cycle_speed", 0.18)))
+        compression_factor = float(getattr(self, "compression_factor_smoothed", 1.0))
+        compression_thermal_strength = self._clamp(float(getattr(self, "water_compression_thermal_strength", 0.85)), 0.0, 1.0)
+        if bool(getattr(self, "debug_force_water_thermal", False)):
+            thermal_mode = 1.0
+            thermal_strength = 1.0
+            compression_factor = 0.0
+            compression_thermal_strength = 1.0
+            room_tex_strength = 0.0
+        density_contrast = max(0.01, float(getattr(self, "water_density_contrast", 1.35)))
+        density_gamma = max(0.05, float(getattr(self, "water_density_gamma", 0.85)))
+        static_uv = 1.0 if bool(getattr(self, "water_static_uv", False)) else 0.0
+        player_w = float(getattr(self, "player_w", 0.0))
+        corridor_w = max(1.0, float(getattr(self, "corridor_w", 16.0)))
+        level_z_step = max(0.1, float(getattr(self, "level_z_step", 6.0)))
+        map_w = max(1.0, float(getattr(self, "map_w", 1.0)))
+        map_d = max(1.0, float(getattr(self, "map_d", 1.0)))
+        reflection_scale = (1.0, -1.0)
+        reflection_offset = (0.0, 1.0)
+        reflection_tex = getattr(self, "water_reflection_tex", None)
+        reflection_strength = 0.6 if reflection_tex is not None else 0.0
+        fog = getattr(self, "fog", None)
+        if fog is not None:
+            fog_color = fog.getColor()
+            fog_start = float(getattr(self, "fog_start", 1.0e6))
+            fog_end = float(getattr(self, "fog_end", 1.0e6 + 1.0))
+        else:
+            fog_color = (0.0, 0.0, 0.0, 1.0)
+            fog_start, fog_end = (1.0e6, 1.0e6 + 1.0)
         for node in self.water_shader_nodes:
             if node is None or node.isEmpty():
                 continue
@@ -1653,8 +1764,80 @@ class SoulSymphony(ShowBase):
             node.setShaderInput("u_rainbow_strength", rainbow_strength)
             node.setShaderInput("u_diffusion_strength", diffusion_strength)
             node.setShaderInput("u_spec_strength", spec_strength)
+            node.setShaderInput("u_room_tex_strength", room_tex_strength)
+            node.setShaderInput("u_room_tex_desat", room_tex_desat)
+            node.setShaderInput("u_thermal_mode", thermal_mode)
+            node.setShaderInput("u_thermal_strength", thermal_strength)
+            node.setShaderInput("u_compression_factor", compression_factor)
+            node.setShaderInput("u_compression_thermal_strength", compression_thermal_strength)
+            node.setShaderInput("u_density_contrast", density_contrast)
+            node.setShaderInput("u_density_gamma", density_gamma)
+            node.setShaderInput("u_static_uv", static_uv)
+            node.setShaderInput("u_player_w", player_w)
+            node.setShaderInput("u_corridor_w", corridor_w)
+            node.setShaderInput("u_level_z_step", level_z_step)
+            node.setShaderInput("u_fog_color", (float(fog_color[0]), float(fog_color[1]), float(fog_color[2])))
+            node.setShaderInput("u_fog_start", float(fog_start))
+            node.setShaderInput("u_fog_end", float(fog_end))
+            if reflection_tex is not None:
+                node.setShaderInput("u_reflection_tex", reflection_tex)
+            node.setShaderInput("u_reflection_scale", reflection_scale)
+            node.setShaderInput("u_reflection_offset", reflection_offset)
+            node.setShaderInput("u_reflection_strength", reflection_strength)
             keep.append(node)
         self.water_shader_nodes = keep
+
+    def _update_room_thermal_shader_inputs(self) -> None:
+        if self.water_surface_shader is None:
+            return
+        keep: list[NodePath] = []
+        uv_scale = max(0.2, float(getattr(self, "room_thermal_uv_scale", 1.0)))
+        thermal_strength = self._clamp(float(getattr(self, "room_thermal_strength", 1.0)), 0.0, 1.0)
+        cycle_strength = self._clamp(float(getattr(self, "room_thermal_cycle_strength", 1.0)), 0.0, 1.0)
+        cycle_speed = max(0.0, float(getattr(self, "room_thermal_cycle_speed", 0.22)))
+        room_tex_strength = 0.0
+        room_tex_desat = self._clamp(float(getattr(self, "room_thermal_room_tex_desat", 1.0)), 0.0, 1.0)
+        compression_factor = float(getattr(self, "compression_factor_smoothed", 1.0))
+        compression_strength = self._clamp(float(getattr(self, "room_thermal_compression_strength", 1.0)), 0.0, 1.0)
+        density_contrast = max(0.01, float(getattr(self, "room_thermal_density_contrast", 1.35)))
+        density_gamma = max(0.05, float(getattr(self, "room_thermal_density_gamma", 0.85)))
+        player_w = float(getattr(self, "player_w", 0.0))
+        corridor_w = max(1.0, float(getattr(self, "corridor_w", 16.0)))
+        level_z_step = max(0.1, float(getattr(self, "level_z_step", 6.0)))
+        fog = getattr(self, "fog", None)
+        if fog is not None:
+            fog_color = fog.getColor()
+            fog_start = float(getattr(self, "fog_start", 1.0e6))
+            fog_end = float(getattr(self, "fog_end", 1.0e6 + 1.0))
+        else:
+            fog_color = (0.0, 0.0, 0.0, 1.0)
+            fog_start, fog_end = (1.0e6, 1.0e6 + 1.0)
+        for node in self.room_thermal_shader_nodes:
+            if node is None or node.isEmpty():
+                continue
+            node.setShaderInput("u_time", 0.0)
+            node.setShaderInput("u_uv_scale", uv_scale)
+            node.setShaderInput("u_alpha", 0.5)
+            node.setShaderInput("u_rainbow_strength", cycle_strength)
+            node.setShaderInput("u_diffusion_strength", cycle_speed)
+            node.setShaderInput("u_spec_strength", 0.0)
+            node.setShaderInput("u_room_tex_strength", room_tex_strength)
+            node.setShaderInput("u_room_tex_desat", room_tex_desat)
+            node.setShaderInput("u_thermal_mode", 1.0)
+            node.setShaderInput("u_thermal_strength", thermal_strength)
+            node.setShaderInput("u_compression_factor", compression_factor)
+            node.setShaderInput("u_compression_thermal_strength", compression_strength)
+            node.setShaderInput("u_density_contrast", density_contrast)
+            node.setShaderInput("u_density_gamma", density_gamma)
+            node.setShaderInput("u_static_uv", 1.0)
+            node.setShaderInput("u_player_w", player_w)
+            node.setShaderInput("u_corridor_w", corridor_w)
+            node.setShaderInput("u_level_z_step", level_z_step)
+            node.setShaderInput("u_fog_color", (float(fog_color[0]), float(fog_color[1]), float(fog_color[2])))
+            node.setShaderInput("u_fog_start", float(fog_start))
+            node.setShaderInput("u_fog_end", float(fog_end))
+            keep.append(node)
+        self.room_thermal_shader_nodes = keep
 
     def _update_video_distortion(self, dt: float, speed: float) -> None:
         if not getattr(self, "enable_video_distortion", True):
@@ -1699,7 +1882,7 @@ class SoulSymphony(ShowBase):
         swim_speed = (0.4 + 0.95 * speed_norm) * (1.0 + 0.36 * timespace_intensity + black_hole_intensity * 0.55) * (0.92 + 0.24 * sine_cycle)
         pulse = 0.92 + 0.4 * (0.5 + 0.5 * math.sin(self.roll_time * (3.7 + tone_rate * 0.8)))
         strength = self.video_distort_strength * (1.05 + 0.95 * speed_norm + black_hole_intensity * 1.1) * pulse * dynamic_mul
-        bloom_strength = self.video_bloom_strength * (0.8 + speed_norm * 0.9) * (0.86 + 0.44 * timespace_intensity)
+        bloom_strength = 0.0
         tex_w, tex_h = getattr(self, "video_distort_tex_size", (0, 0))
         if tex_w <= 0 or tex_h <= 0:
             tex_w = int(max(1, self.win.getXSize()))
@@ -3594,6 +3777,7 @@ class SoulSymphony(ShowBase):
             return
         monster["state"] = new_state
         monster["state_timer"] = 0.0
+        self._set_monster_emissive(monster, new_state == "hunting")
         auto_announce_states = {"guarding", "hunting", "attacking", "running"}
         announce_cooldown = float(monster.get("state_announce_cooldown", 0.0))
         if not announce and new_state in auto_announce_states and announce_cooldown <= 0.0:
@@ -3622,6 +3806,19 @@ class SoulSymphony(ShowBase):
             root = monster.get("root")
             if root is not None and not root.isEmpty():
                 self._spawn_floating_text(root.getPos() + Vec3(0, 0, 1.3), text, color, scale=0.2, life=0.55)
+
+    def _set_monster_emissive(self, monster: dict, enabled: bool) -> None:
+        parts = monster.get("parts") or []
+        for entry in parts:
+            node = entry.get("node")
+            if node is None or node.isEmpty():
+                continue
+            if enabled:
+                node.setLightOff(1)
+                node.setColorScale(1.6, 1.6, 1.6, 1.0)
+            else:
+                node.setLightOff(0)
+                node.setColorScale(1.0, 1.0, 1.0, 1.0)
 
     def _apply_monster_ai_state(self, monster: dict, state: str) -> None:
         behaviors = monster.get("ai_behaviors")
@@ -4262,6 +4459,64 @@ class SoulSymphony(ShowBase):
         v_up *= vertical_drag
         self.ball_body.setLinearVelocity(v_planar + up * v_up)
 
+    def _apply_room_thermal_shader(self, node: NodePath | None) -> None:
+        if node is None or node.isEmpty():
+            return
+        if self.water_surface_shader is None:
+            print("[thermal] Room thermal skipped (water_surface_shader missing)")
+            return
+        node.setTag("room_thermal", "1")
+        print("[thermal] Applied room thermal shader")
+        node.clearTexture()
+        try:
+            node.clearTexGen()
+        except Exception:
+            pass
+        node.setColor(1.0, 1.0, 1.0, 1.0)
+        node.setDepthWrite(False)
+        node.setBin("transparent", 30)
+        try:
+            node.setTransparency(TransparencyAttrib.MAlpha)
+        except Exception:
+            pass
+        try:
+            node.clearAttrib(ColorBlendAttrib.getClassType())
+        except Exception:
+            pass
+        node.setDepthWrite(True)
+        node.setLightOff(1)
+        node.setShader(self.water_surface_shader)
+        node.setShaderInput("u_room_tex", self.level_checker_tex)
+        node.setShaderInput("u_time", 0.0)
+        node.setShaderInput("u_uv_scale", float(getattr(self, "room_thermal_uv_scale", 1.0)))
+        node.setShaderInput("u_alpha", 0.5)
+        node.setShaderInput("u_rainbow_strength", 0.0)
+        node.setShaderInput("u_diffusion_strength", 0.0)
+        node.setShaderInput("u_spec_strength", 0.0)
+        node.setShaderInput("u_room_tex_strength", 0.0)
+        node.setShaderInput("u_room_tex_desat", 1.0)
+        node.setShaderInput("u_thermal_mode", 1.0)
+        node.setShaderInput("u_thermal_strength", float(getattr(self, "room_thermal_strength", 1.0)))
+        node.setShaderInput("u_compression_factor", 1.0)
+        node.setShaderInput("u_compression_thermal_strength", 0.0)
+        node.setShaderInput("u_density_contrast", float(getattr(self, "room_thermal_density_contrast", 1.35)))
+        node.setShaderInput("u_density_gamma", float(getattr(self, "room_thermal_density_gamma", 0.85)))
+        node.setShaderInput("u_static_uv", 1.0)
+        fog = getattr(self, "fog", None)
+        if fog is not None:
+            fog_color = fog.getColor()
+            fog_start = float(getattr(self, "fog_start", 1.0e6))
+            fog_end = float(getattr(self, "fog_end", 1.0e6 + 1.0))
+        else:
+            fog_color = (0.0, 0.0, 0.0, 1.0)
+            fog_start, fog_end = (1.0e6, 1.0e6 + 1.0)
+        node.setShaderInput("u_fog_color", (float(fog_color[0]), float(fog_color[1]), float(fog_color[2])))
+        node.setShaderInput("u_fog_start", float(fog_start))
+        node.setShaderInput("u_fog_end", float(fog_end))
+        node.setShaderInput("u_reflection_strength", 0.0)
+        if node not in self.room_thermal_shader_nodes:
+            self.room_thermal_shader_nodes.append(node)
+
     def _apply_smart_room_uv(self, node: NodePath, pos: Vec3, scale: Vec3, surface_mode: str | None = None) -> None:
         if node is None or node.isEmpty():
             return
@@ -4302,6 +4557,231 @@ class SoulSymphony(ShowBase):
         off_u = ((seed * 0.61803398875) % 1.0 + (u_world * density * 0.07)) % 1.0
         off_v = ((seed * 0.41421356237) % 1.0 + (v_world * density * 0.07)) % 1.0
         forced_mode = (surface_mode or "").strip().lower()
+        disable_world_textures = bool(getattr(self, "disable_world_textures", False))
+        single_world_water_tex = bool(getattr(self, "single_world_water_texture_mode", False))
+        static_water_uv = bool(getattr(self, "water_static_uv", False))
+
+        if forced_mode in ("floor", "ceiling", "wall", "water"):
+            mode = forced_mode
+        elif normal_axis == "x" or normal_axis == "y":
+            mode = "wall"
+        else:
+            mode = "ceiling" if pos.z > (self.floor_y + self.wall_h * 0.55) else "floor"
+
+
+        holder = node.getParent() if node is not None else None
+        motion_group = ""
+        if holder is not None and not holder.isEmpty() and holder.hasTag("motion_group"):
+            motion_group = holder.getTag("motion_group").strip().lower()
+        if motion_group == "platform":
+            node.clearShader()
+            try:
+                if node in self.water_shader_nodes:
+                    self.water_shader_nodes.remove(node)
+            except Exception:
+                pass
+            try:
+                node.clearTexGen()
+            except Exception:
+                pass
+            node.clearTexture()
+            node.setTexture(self._get_random_room_texture(), 1)
+            base_repeat = max(0.05, float(getattr(self, "single_platform_texture_repeat", 0.35)))
+            platform_scale = holder.getScale() if holder is not None else scale
+            sx = max(0.01, abs(platform_scale.x))
+            sy = max(0.01, abs(platform_scale.y))
+            sz = max(0.01, abs(platform_scale.z))
+            max_dim = max(sx, sy, sz)
+            try:
+                node.setTexGen(TextureStage.getDefault(), TexGenAttrib.MWorldPosition)
+            except Exception:
+                pass
+            node.setTexScale(
+                TextureStage.getDefault(),
+                base_repeat * (max_dim / sx),
+                base_repeat * (max_dim / sy),
+                base_repeat * (max_dim / sz),
+            )
+            node.setTexOffset(TextureStage.getDefault(), off_u, off_v)
+            node.setColor(1.0, 1.0, 1.0, 1.0)
+            node.setDepthWrite(True)
+            node.clearBin()
+            try:
+                node.setTransparency(TransparencyAttrib.MNone)
+            except Exception:
+                pass
+            try:
+                node.clearAttrib(ColorBlendAttrib.getClassType())
+            except Exception:
+                pass
+            node.setLightOff(1)
+            return
+
+
+        if mode in ("floor", "wall", "ceiling") and self.water_surface_shader is not None and forced_mode != "water":
+            self._apply_room_thermal_shader(node)
+            return
+
+        if disable_world_textures and mode in ("floor", "wall", "ceiling"):
+            if self.water_surface_shader is not None:
+                node.clearTexture()
+                try:
+                    node.clearTexGen()
+                except Exception:
+                    pass
+                node.setColor(1.0, 1.0, 1.0, 1.0)
+                node.setDepthWrite(True)
+                node.clearBin()
+                try:
+                    node.setTransparency(TransparencyAttrib.MNone)
+                except Exception:
+                    pass
+                try:
+                    node.clearAttrib(ColorBlendAttrib.getClassType())
+                except Exception:
+                    pass
+                node.setLightOff(1)
+                node.setShader(self.water_surface_shader)
+                self._apply_water_surface_room_texture(node)
+                if node not in self.water_shader_nodes:
+                    self.water_shader_nodes.append(node)
+                return
+            node.clearTexture()
+            try:
+                node.clearTexGen()
+            except Exception:
+                pass
+            try:
+                node.setTextureOff(1)
+            except Exception:
+                pass
+            node.clearBin()
+            node.setDepthWrite(True)
+            try:
+                node.setTransparency(TransparencyAttrib.MNone)
+            except Exception:
+                pass
+            try:
+                node.clearAttrib(ColorBlendAttrib.getClassType())
+            except Exception:
+                pass
+            try:
+                if node in self.floor_shader_nodes:
+                    self.floor_shader_nodes.remove(node)
+            except Exception:
+                pass
+            node.clearShader()
+            try:
+                if node in self.water_shader_nodes:
+                    self.water_shader_nodes.remove(node)
+            except Exception:
+                pass
+            node.setLightOff(1)
+            return
+
+        if mode == "water":
+            try:
+                node.setTextureOff(1)
+            except Exception:
+                pass
+
+        if single_world_water_tex and not disable_world_textures:
+            holder = node.getParent() if node is not None else None
+            motion_group = ""
+            if holder is not None and not holder.isEmpty() and holder.hasTag("motion_group"):
+                motion_group = holder.getTag("motion_group").strip().lower()
+            is_platform = motion_group == "platform"
+            stage = self.water_tex_stage if mode == "water" else TextureStage.getDefault()
+            node.clearTexture()
+            node.clearShader()
+            try:
+                node.clearTexGen()
+            except Exception:
+                pass
+            try:
+                node.setTexGen(stage, TexGenAttrib.MWorldPosition)
+            except Exception:
+                pass
+            if mode == "water" and self.apply_room_texture_to_water:
+                node.setTexture(stage, self._get_room_surface_texture(), 1)
+            elif mode != "water":
+                node.setTexture(stage, self.water_base_tex, 1)
+            if mode == "water":
+                base_repeat = max(1.0, float(getattr(self, "single_water_texture_repeat", 12.0)))
+            elif is_platform:
+                base_repeat = max(0.05, float(getattr(self, "single_platform_texture_repeat", 0.35)))
+            else:
+                base_repeat = max(0.05, float(getattr(self, "single_room_texture_repeat", 1.0)))
+            node.setTexScale(stage, base_repeat, base_repeat, base_repeat)
+            if mode == "water" and static_water_uv:
+                node.setTexOffset(stage, 0.0, 0.0)
+            else:
+                node.setTexOffset(stage, off_u, off_v)
+            if mode == "water":
+                node.setColor(1.0, 1.0, 1.0, 0.5)
+                node.setDepthWrite(True)
+                node.clearBin()
+                try:
+                    node.setTransparency(TransparencyAttrib.MNone)
+                except Exception:
+                    pass
+                node.setLightOff(1)
+                try:
+                    node.clearAttrib(ColorBlendAttrib.getClassType())
+                except Exception:
+                    pass
+                if self.water_surface_shader is not None:
+                    node.setShader(self.water_surface_shader)
+                    self._apply_water_surface_room_texture(node)
+                    if node not in self.water_shader_nodes:
+                        self.water_shader_nodes.append(node)
+                else:
+                    node.clearShader()
+            else:
+                node.setColor(1.0, 1.0, 1.0, 1.0)
+                node.setDepthWrite(True)
+                node.clearBin()
+                try:
+                    node.setTransparency(TransparencyAttrib.MNone)
+                except Exception:
+                    pass
+                try:
+                    node.clearAttrib(ColorBlendAttrib.getClassType())
+                except Exception:
+                    pass
+            return
+
+        if disable_world_textures:
+            node.clearTexture()
+            node.clearShader()
+            try:
+                node.clearTexGen()
+            except Exception:
+                pass
+            node.clearBin()
+            if mode == "water":
+                node.setColor(1.0, 1.0, 1.0, 1.0)
+                node.setDepthWrite(True)
+                try:
+                    node.setTransparency(TransparencyAttrib.MNone)
+                except Exception:
+                    pass
+                node.setLightOff(1)
+            else:
+                try:
+                    node.setTransparency(TransparencyAttrib.MNone)
+                except Exception:
+                    pass
+                node.setDepthWrite(True)
+                if mode == "floor":
+                    node.setColor(0.26, 0.28, 0.3, 1.0)
+                elif mode == "wall":
+                    node.setColor(0.3, 0.32, 0.34, 1.0)
+                elif mode == "ceiling":
+                    node.setColor(0.22, 0.24, 0.26, 1.0)
+                else:
+                    node.setColor(0.34, 0.34, 0.34, 1.0)
+            return
 
         stage = TextureStage.getDefault()
 
@@ -4335,15 +4815,23 @@ class SoulSymphony(ShowBase):
                 except Exception:
                     node.clearTexGen()
             if mode == "water":
-                node.setTexture(stage, self.water_base_tex, 1)
+                node.clearTexture()
+                try:
+                    node.setTextureOff(1)
+                except Exception:
+                    pass
             elif mode in ("floor", "wall", "ceiling"):
-                node.setTexture(stage, self._get_random_room_texture(), 1)
+                node.setTexture(stage, self._get_room_surface_texture(), 1)
             else:
                 node.setTexture(stage, self.level_checker_tex, 1)
             cube_repeat = max(0.08, min(0.62, (u_repeat + v_repeat) * 0.06))
             if mode == "water":
                 cube_repeat = min(12.0, max(1.0, float(getattr(self, "water_uv_repeat_scale", 3.2)) * 0.6))
-                self._apply_water_cube_projection(node, uv_scale=cube_repeat, uv_offset_u=off_u, uv_offset_v=off_v)
+                node.clearTexture()
+                try:
+                    node.clearTexGen()
+                except Exception:
+                    pass
             elif mode == "floor":
                 floor_repeat = max(1.0, float(getattr(self, "room_floor_uv_repeat_scale", 100.0)))
                 node.setTexScale(stage, floor_repeat, floor_repeat, 1.0)
@@ -4353,53 +4841,25 @@ class SoulSymphony(ShowBase):
                 node.setTexOffset(stage, off_u, off_v)
 
             if mode == "water":
-                node.setColor(0.46, 0.72, 0.92, 0.14)
-                node.setTransparency(TransparencyAttrib.MAlpha)
-                node.setDepthWrite(False)
-                node.setBin("transparent", 33)
-                node.setAttrib(
-                    ColorBlendAttrib.make(
-                        ColorBlendAttrib.MAdd,
-                        ColorBlendAttrib.OIncomingAlpha,
-                        ColorBlendAttrib.OOne,
-                    ),
-                    1,
-                )
-
-                layer_c = TextureStage(f"water-spec-c-{len(self.dynamic_room_uv_nodes)}")
-                layer_c.setMode(TextureStage.MAdd)
-                layer_c.setSort(42)
-                node.setTexture(layer_c, self.water_specular_tex, 42)
+                node.setColor(1.0, 1.0, 1.0, 1.0)
+                node.setDepthWrite(True)
+                node.clearBin()
                 try:
-                    node.setTexGen(layer_c, TexGenAttrib.MWorldPosition)
+                    node.setTransparency(TransparencyAttrib.MNone)
                 except Exception:
                     pass
-                gain = float(getattr(self, "texture_layer_additive_gain", 0.42))
-                spec_strength = self._clamp(float(getattr(self, "water_specular_strength", 0.72)), 0.0, 1.0)
-                layer_c.setColor((gain, gain, gain, 0.16 + spec_strength * 0.26))
-
-            if mode == "water":
-                self.dynamic_room_uv_nodes.append(
-                    {
-                        "node": node,
-                        "stage": stage,
-                        "mode": "water",
-                        "base_u": off_u,
-                        "base_v": off_v,
-                        "base_ru": cube_repeat,
-                        "base_rv": cube_repeat,
-                        "center": Vec3(pos),
-                        "speed": random.uniform(0.38, 0.82),
-                        "phase": random.uniform(0.0, math.tau),
-                        "dir": -1.0 if random.random() < 0.5 else 1.0,
-                        "w": self._compute_level_w(pos),
-                        "layer_a": None,
-                        "layer_b": None,
-                        "layer_c": layer_c,
-                        "water_spec_repeat": float(getattr(self, "water_specular_detail_repeat", 7.5)),
-                        "water_spec_speed": float(getattr(self, "water_specular_scroll_speed", 1.85)),
-                    }
-                )
+                node.setLightOff(1)
+                try:
+                    node.clearAttrib(ColorBlendAttrib.getClassType())
+                except Exception:
+                    pass
+                if self.water_surface_shader is not None:
+                    node.setShader(self.water_surface_shader)
+                    self._apply_water_surface_room_texture(node)
+                    if node not in self.water_shader_nodes:
+                        self.water_shader_nodes.append(node)
+                else:
+                    node.clearShader()
             elif self.animate_non_water_uv and mode != "water":
                 self.dynamic_room_uv_nodes.append(
                     {
@@ -4423,14 +4883,10 @@ class SoulSymphony(ShowBase):
             return
 
         node.setTexScale(stage, u_repeat, v_repeat)
-        node.setTexOffset(stage, off_u, off_v)
-
-        if forced_mode in ("floor", "ceiling", "wall", "water"):
-            mode = forced_mode
-        elif normal_axis == "x" or normal_axis == "y":
-            mode = "wall"
+        if mode == "water" and static_water_uv:
+            node.setTexOffset(stage, 0.0, 0.0)
         else:
-            mode = "ceiling" if pos.z > (self.floor_y + self.wall_h * 0.55) else "floor"
+            node.setTexOffset(stage, off_u, off_v)
 
         if mode in ("floor", "water"):
             node.setTwoSided(False)
@@ -4450,9 +4906,18 @@ class SoulSymphony(ShowBase):
             off_v = 0.0
             if mode == "water":
                 stage = self.water_tex_stage
-                node.clearTexture()
-                node.setTexture(stage, self.water_base_tex, 1)
-                self._apply_water_cube_projection(node, uv_scale=max(0.1, u_repeat), uv_offset_u=off_u, uv_offset_v=off_v)
+                if self.apply_room_texture_to_water:
+                    node.setTexture(stage, self._get_room_surface_texture(), 1)
+                else:
+                    node.clearTexture()
+                    try:
+                        node.setTextureOff(1)
+                    except Exception:
+                        pass
+                try:
+                    node.clearTexGen()
+                except Exception:
+                    pass
             else:
                 try:
                     node.setTexGen(stage, TexGenAttrib.MWorldPosition)
@@ -4460,33 +4925,44 @@ class SoulSymphony(ShowBase):
                     node.clearTexGen()
                 node.setTexScale(stage, u_repeat, v_repeat)
                 node.setTexOffset(stage, off_u, off_v)
-                node.setTexture(self.floor_fractal_tex_a, 1)
-            if mode == "water":
-                node.setColor(0.46, 0.72, 0.92, 0.14)
-                node.setTransparency(TransparencyAttrib.MAlpha)
-                node.setDepthWrite(False)
-                node.setBin("transparent", 33)
-                node.setAttrib(
-                    ColorBlendAttrib.make(
-                        ColorBlendAttrib.MAdd,
-                        ColorBlendAttrib.OIncomingAlpha,
-                        ColorBlendAttrib.OOne,
-                    ),
-                    1,
-                )
-                if bool(getattr(self, "water_emissive_linux_enabled", False)):
-                    emissive_scale = max(1.0, float(getattr(self, "water_emissive_linux_scale", 1.35)))
-                    node.setLightOff(1)
-                    node.setColorScale(emissive_scale, emissive_scale, emissive_scale, 1.0)
-                else:
+                if mode == "floor" and not self.enable_floor_textures:
+                    node.clearTexture()
                     try:
-                        node.clearLight()
+                        node.setTextureOff(1)
                     except Exception:
                         pass
-                    node.setColorScale(1.0, 1.0, 1.0, 1.0)
+                elif mode == "floor" and self.single_room_texture_mode:
+                    node.setTexture(self._get_room_surface_texture(), 1)
+                else:
+                    node.setTexture(self.floor_fractal_tex_a, 1)
+            if mode == "water":
+                node.setColor(1.0, 1.0, 1.0, 1.0)
+                node.setDepthWrite(True)
+                node.clearBin()
+                try:
+                    node.setTransparency(TransparencyAttrib.MNone)
+                except Exception:
+                    pass
+                node.setLightOff(1)
+                try:
+                    node.clearAttrib(ColorBlendAttrib.getClassType())
+                except Exception:
+                    pass
+                if self.water_surface_shader is not None:
+                    node.setShader(self.water_surface_shader)
+                    self._apply_water_surface_room_texture(node)
+                    if node not in self.water_shader_nodes:
+                        self.water_shader_nodes.append(node)
+                else:
+                    node.clearShader()
+                try:
+                    node.clearLight()
+                except Exception:
+                    pass
+                node.setColorScale(1.0, 1.0, 1.0, 1.0)
             else:
                 node.setColor(0.9, 0.96, 1.0, 1.0)
-            if self.floor_wet_shader is not None and mode == "floor":
+            if self.floor_wet_shader is not None and mode == "floor" and self.enable_floor_textures:
                 node.setShader(self.floor_wet_shader)
                 node.setShaderInput("u_time", self.roll_time)
                 node.setShaderInput("u_contact_uv", self.floor_contact_uv)
@@ -4495,6 +4971,8 @@ class SoulSymphony(ShowBase):
                 self.floor_shader_nodes.append(node)
         elif mode in ("wall", "ceiling"):
             cube_repeat = max(0.02, min(1.6, (u_repeat + v_repeat) * 0.12))
+            if self.single_room_texture_mode:
+                node.setTexture(self._get_room_surface_texture(), 1)
             try:
                 node.setTexGen(stage, TexGenAttrib.MWorldPosition)
             except Exception:
@@ -4555,7 +5033,7 @@ class SoulSymphony(ShowBase):
                 op_scale = self._clamp(float(getattr(self, "water_additive_opacity_scale", 0.34)), 0.0, 1.0)
                 layer_c.setColor((gain, gain, gain, (0.16 + spec_strength * 0.26) * op_scale))
 
-        should_track_dynamic_uv = mode == "water" or self.animate_non_water_uv
+        should_track_dynamic_uv = self.animate_non_water_uv and mode != "water"
         if not should_track_dynamic_uv:
             return
 
@@ -5736,6 +6214,35 @@ class SoulSymphony(ShowBase):
         if not textures:
             textures.append(self.level_checker_tex)
         return textures
+
+    def _select_single_room_texture(self) -> Texture | None:
+        if self.room_texture_paths:
+            path = random.choice(self.room_texture_paths)
+            tex = self._get_cached_texture(path)
+            if tex is not None:
+                return tex
+        if self.room_textures:
+            return random.choice(self.room_textures)
+        return None
+
+    def _get_room_surface_texture(self) -> Texture:
+        if self.single_room_texture_mode and self.single_room_texture is not None:
+            return self.single_room_texture
+        return self._get_random_room_texture()
+
+    def _apply_water_surface_room_texture(self, node: NodePath | None) -> None:
+        if node is None or node.isEmpty():
+            return
+        if node.hasTag("room_tex_bound"):
+            return
+        node_id = id(node)
+        tex = self.water_room_tex_map.get(node_id)
+        if tex is None:
+            tex = self._get_random_room_texture()
+            self.water_room_tex_map[node_id] = tex
+        if tex is not None:
+            node.setShaderInput("u_room_tex", tex)
+            node.setTag("room_tex_bound", "1")
 
     def _get_random_room_texture(self) -> Texture:
         if self.lazy_vram_loading:
@@ -7342,6 +7849,12 @@ class SoulSymphony(ShowBase):
 
         mode = "PERFORMANCE" if self.performance_mode else "QUALITY"
         print(f"[perf] Mode switched to {mode} (key 1)")
+        self._print_active_shader_texture_list()
+
+    def _toggle_water_thermal_debug(self) -> None:
+        self.debug_force_water_thermal = not bool(getattr(self, "debug_force_water_thermal", False))
+        state = "ON" if self.debug_force_water_thermal else "OFF"
+        print(f"[water] Thermal debug {state} (key T)")
 
     def _setup_mouse_look(self) -> None:
         if not self.enable_mouse_look or self.win is None:
@@ -7397,6 +7910,8 @@ class SoulSymphony(ShowBase):
     ) -> NodePath:
         target = parent if parent is not None else self.world
         holder = target.attachNewNode("box-holder")
+        if motion_group:
+            holder.setTag("motion_group", str(motion_group).strip().lower())
         if surface_mode:
             sm = str(surface_mode).strip().lower()
             holder.setTag("surface_mode", sm)
@@ -7410,7 +7925,14 @@ class SoulSymphony(ShowBase):
         node.setScale(self.box_norm_scale)
         node.setColor(color)
         node.clearTexture()
-        node.setTexture(self._get_random_room_texture(), 1)
+        box_surface_mode = (str(surface_mode).strip().lower() if surface_mode is not None else "")
+        if not bool(getattr(self, "disable_world_textures", False)):
+            if box_surface_mode == "water":
+                pass
+            elif bool(getattr(self, "single_world_water_texture_mode", False)):
+                node.setTexture(self.water_base_tex, 1)
+            else:
+                node.setTexture(self._get_room_surface_texture(), 1)
         self._apply_smart_room_uv(node, pos, scale, surface_mode=surface_mode)
 
         if self.enable_occlusion_outlines:
@@ -7433,9 +7955,13 @@ class SoulSymphony(ShowBase):
 
         scale_hint = max(1.0, abs(scale.x) + abs(scale.y) + abs(scale.z))
         target_w = self._compute_level_w(pos) if w_coord is None else w_coord
-        self._apply_hypercube_projection(node, target_w, scale_hint=scale_hint)
-        if not surface_mode or str(surface_mode).strip().lower() != "water":
-            self._register_color_cycle(node, color, min_speed=0.045, max_speed=0.11)
+        surface_tag = (surface_mode or "").strip().lower()
+        if surface_tag not in ("water", "floor", "ceiling"):
+            self._apply_hypercube_projection(node, target_w, scale_hint=scale_hint)
+        surface_tag = (surface_mode or "").strip().lower()
+        if surface_tag != "water":
+            if not node.hasTag("room_thermal"):
+                self._register_color_cycle(node, color, min_speed=0.045, max_speed=0.11)
         self._register_scene_visual(holder, target_w)
 
         body_np = None
@@ -7481,17 +8007,77 @@ class SoulSymphony(ShowBase):
         root.setScale(1.0, 1.0, -1.0)
         root.setTransparency(TransparencyAttrib.MAlpha)
         root.setAlphaScale(opacity)
-        root.setShaderOff(1)
+        if self.water_surface_shader is not None:
+            root.setShader(self.water_surface_shader)
+            root.setShaderInput("u_room_tex", self.level_checker_tex)
+            root.setShaderInput("u_time", 0.0)
+            root.setShaderInput("u_uv_scale", float(getattr(self, "room_thermal_uv_scale", 1.0)))
+            root.setShaderInput("u_alpha", 0.5)
+            root.setShaderInput("u_rainbow_strength", 0.0)
+            root.setShaderInput("u_diffusion_strength", 0.0)
+            root.setShaderInput("u_spec_strength", 0.0)
+            root.setShaderInput("u_room_tex_strength", 0.0)
+            root.setShaderInput("u_room_tex_desat", 1.0)
+            root.setShaderInput("u_thermal_mode", 1.0)
+            root.setShaderInput("u_thermal_strength", float(getattr(self, "room_thermal_strength", 1.0)))
+            root.setShaderInput("u_compression_factor", 1.0)
+            root.setShaderInput("u_compression_thermal_strength", 0.0)
+            root.setShaderInput("u_density_contrast", float(getattr(self, "room_thermal_density_contrast", 1.35)))
+            root.setShaderInput("u_density_gamma", float(getattr(self, "room_thermal_density_gamma", 0.85)))
+            root.setShaderInput("u_static_uv", 1.0)
+            fog = getattr(self, "fog", None)
+            if fog is not None:
+                fog_color = fog.getColor()
+                fog_start = float(getattr(self, "fog_start", 1.0e6))
+                fog_end = float(getattr(self, "fog_end", 1.0e6 + 1.0))
+            else:
+                fog_color = (0.0, 0.0, 0.0, 1.0)
+                fog_start, fog_end = (1.0e6, 1.0e6 + 1.0)
+            root.setShaderInput("u_fog_color", (float(fog_color[0]), float(fog_color[1]), float(fog_color[2])))
+            root.setShaderInput("u_fog_start", float(fog_start))
+            root.setShaderInput("u_fog_end", float(fog_end))
+            root.setShaderInput("u_reflection_strength", 0.0)
+        else:
+            root.setShaderOff(1)
 
-        for visual in list(self.scene_visuals.values()):
-            if visual is None or visual.isEmpty():
-                continue
-            try:
-                visual.instanceTo(root)
-            except Exception:
-                continue
+    def _setup_water_reflection(self) -> None:
+        self.water_reflection_tex = None
+        self.water_reflection_buf = None
+        self.water_reflection_cam = None
+        if self.win is None or self.camLens is None:
+            return
+        try:
+            size = int(max(128, float(getattr(self, "water_reflection_size", 512))))
+            tex = Texture("water-reflection")
+            buf = self.win.makeTextureBuffer("water-reflection", size, size, tex)
+            if buf is None:
+                return
+            buf.setClearColor((0.0, 0.0, 0.0, 1.0))
+            cam = self.makeCamera(buf)
+            cam.reparentTo(self.render)
+            cam.node().setLens(self.camLens)
+            self.water_reflection_tex = tex
+            self.water_reflection_buf = buf
+            self.water_reflection_cam = cam
+        except Exception:
+            self.water_reflection_tex = None
+            self.water_reflection_buf = None
+            self.water_reflection_cam = None
 
-        self.inverted_level_echo_root = root
+    def _update_water_reflection(self) -> None:
+        cam = getattr(self, "water_reflection_cam", None)
+        if cam is None or cam.isEmpty() or self.camera is None:
+            return
+        plane_z = float(self.floor_y + self.water_surface_raise)
+        cam_pos = self.camera.getPos(self.render)
+        cam_forward = self.camera.getQuat(self.render).getForward()
+        target = cam_pos + cam_forward
+        refl_pos = Vec3(cam_pos.x, cam_pos.y, plane_z * 2.0 - cam_pos.z)
+        refl_target = Vec3(target.x, target.y, plane_z * 2.0 - target.z)
+        cam.setPos(refl_pos)
+        cam.lookAt(refl_target, Vec3(0, 0, 1))
+
+        # Reflection camera rendering uses existing scene graph; no extra instances needed.
 
     def _set_visual_occluded(self, visual_id: int, occluded: bool) -> None:
         if occluded:
@@ -7661,7 +8247,7 @@ class SoulSymphony(ShowBase):
                 continue
 
             surface_mode = visual.getTag("surface_mode") if not visual.isEmpty() else ""
-            if surface_mode in ("wall", "water"):
+            if surface_mode in ("wall", "water", "floor", "ceiling"):
                 self.scene_cull_miss_counts[vid] = 0
                 if vid in self.scene_cull_hidden:
                     visual.unstash()
@@ -8571,6 +9157,7 @@ class SoulSymphony(ShowBase):
                 landmark_root.setPos(center)
                 landmark_root.setH(random.uniform(0.0, 360.0))
                 landmark_root.setCollideMask(BitMask32.allOn())
+                landmark_root.setShaderOff(1)
 
                 model_np = None
                 if model_path is not None:
@@ -8581,6 +9168,7 @@ class SoulSymphony(ShowBase):
 
                 if model_np is not None and not model_np.isEmpty():
                     model_np.reparentTo(landmark_root)
+                    model_np.setShaderOff(1)
                     if bool(getattr(self, "landmark_linux_axis_fix", False)):
                         path_l = str(model_path).lower() if model_path is not None else ""
                         if path_l.endswith((".gltf", ".glb", ".obj")):
@@ -9581,8 +10169,24 @@ class SoulSymphony(ShowBase):
         return layers
 
     def _register_color_cycle(self, node: NodePath, base_color: tuple[float, float, float, float], min_speed: float = 0.05, max_speed: float = 0.12) -> None:
+        if not bool(getattr(self, "enable_color_cycle", False)):
+            return
         r, g, b, a = base_color
         h, s, v = colorsys.rgb_to_hsv(r, g, b)
+        try:
+            node.setTransparency(TransparencyAttrib.MAlpha)
+        except Exception:
+            pass
+        node.setDepthWrite(False)
+        node.setBin("transparent", 26)
+        node.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne,
+            ),
+            1,
+        )
         tex_layers = self._build_texture_cycle_layers(node)
         self.color_cycle_nodes.append(
             {
@@ -9598,6 +10202,8 @@ class SoulSymphony(ShowBase):
         )
 
     def _update_color_cycle(self, dt: float) -> None:
+        if not bool(getattr(self, "enable_color_cycle", False)):
+            return
         self.color_cycle_time += dt
         keep: list[dict] = []
         for entry in self.color_cycle_nodes:
@@ -9704,6 +10310,7 @@ class SoulSymphony(ShowBase):
             spawn_pos = self._clamp_point_inside_room(room_idx, Vec3(spawn_pos), inset=0.78)
             root = self.world.attachNewNode(f"cube-monster-{idx}")
             root.setPos(spawn_pos)
+            root.setShaderOff(1)
 
             variant = "normal"
             hp_mult = 1.0
@@ -10662,6 +11269,11 @@ class SoulSymphony(ShowBase):
                 water_holder.setTransparency(TransparencyAttrib.MAlpha)
                 water_holder.setDepthWrite(False)
                 water_holder.setBin("transparent", 33)
+                if self.water_surface_shader is not None:
+                    water_holder.setShader(self.water_surface_shader)
+                    self._apply_water_surface_room_texture(water_holder)
+                    if water_holder not in self.water_shader_nodes:
+                        self.water_shader_nodes.append(water_holder)
                 self._register_water_surface(
                     water_holder,
                     -overscan,
@@ -12002,6 +12614,11 @@ class SoulSymphony(ShowBase):
                     water_holder.setTransparency(TransparencyAttrib.MAlpha)
                     water_holder.setDepthWrite(False)
                     water_holder.setBin("transparent", 33)
+                    if self.water_surface_shader is not None:
+                        water_holder.setShader(self.water_surface_shader)
+                        self._apply_water_surface_room_texture(water_holder)
+                        if water_holder not in self.water_shader_nodes:
+                            self.water_shader_nodes.append(water_holder)
 
         self.pending_floor_rects.clear()
         self.pending_floor_holes.clear()
@@ -12047,6 +12664,7 @@ class SoulSymphony(ShowBase):
     def update(self, task):
         dt = globalClock.getDt()
         dt = min(dt, 1 / 30)
+        self._update_water_reflection()
         self._update_infinite_world_goal(dt)
         self.monster_anim_tick += 1
         self.hit_cooldown = max(0.0, self.hit_cooldown - dt)
@@ -12054,7 +12672,7 @@ class SoulSymphony(ShowBase):
         self.monster_contact_sfx_cooldown = max(0.0, self.monster_contact_sfx_cooldown - dt)
         self.player_damage_cooldown = max(0.0, self.player_damage_cooldown - dt)
         self.roll_time += dt
-        self._update_water_surface_waves(self.roll_time)
+        #self._update_water_surface_waves(self.roll_time)
         self._update_water_crystals(dt)
         self._update_ball_texture_scroll(dt)
         self.vertical_mover_update_timer -= dt
@@ -12516,6 +13134,7 @@ class SoulSymphony(ShowBase):
 
         self._update_floor_wet_shader_inputs(dt, grounded_contact if self.grounded else None, speed)
         self._update_water_surface_shader_inputs()
+        self._update_room_thermal_shader_inputs()
 
         self._update_ripple_transparency(dt, grounded_contact if self.grounded else None)
 

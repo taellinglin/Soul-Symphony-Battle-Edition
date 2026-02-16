@@ -12,7 +12,9 @@ def setup_camera(app) -> None:
     if not hasattr(app, "fog") or app.fog is None:
         app.fog = Fog("scene-fog")
     app.fog.setColor(0.1, 0.12, 0.17)
-    app.fog.setLinearRange(4, 160)
+    app.fog.setLinearRange(0.8, 18.0)
+    app.fog_start = 0.8
+    app.fog_end = 18.0
     app.render.setFog(app.fog)
     target = app.ball_np.getPos() + Vec3(0, 0, app.camera_target_height)
     app.camera.setPos(target + Vec3(-8, -8, 5))

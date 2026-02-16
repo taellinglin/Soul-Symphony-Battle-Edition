@@ -7,6 +7,7 @@ from panda3d.core import Material, PointLight, TextureStage, TransparencyAttrib,
 
 def setup_weapon_system(game) -> None:
     game.sword_pivot = game.world.attachNewNode("sword-pivot")
+    game.sword_pivot.setShaderOff(1)
     sword_scale = max(1.0, float(getattr(game, "ball_radius", 0.4)) / 0.4)
     game.sword_up_offset = max(game.sword_up_offset, game.ball_radius + 0.16)
     game.sword_forward_offset = max(game.sword_forward_offset, 0.34 * sword_scale)
@@ -26,6 +27,7 @@ def setup_weapon_system(game) -> None:
     guard.setColor(0.76, 0.84, 0.95, 1)
     guard.clearTexture()
     guard.setTexture(game.level_checker_tex, 1)
+    guard.setShaderOff(1)
 
     grip = game.box_model.copyTo(game.sword_pivot)
     grip.setPos(game.box_norm_offset)
@@ -35,6 +37,7 @@ def setup_weapon_system(game) -> None:
     grip.setColor(0.18, 0.22, 0.32, 1)
     grip.clearTexture()
     grip.setTexture(game.level_checker_tex, 1)
+    grip.setShaderOff(1)
 
     blade = game.box_model.copyTo(game.sword_pivot)
     blade.setPos(game.box_norm_offset)
@@ -45,6 +48,7 @@ def setup_weapon_system(game) -> None:
     blade.clearTexture()
     blade.setTexture(game.level_checker_tex, 1)
     blade.setMaterial(game.sword_emissive_material, 1)
+    blade.setShaderOff(1)
     game.sword_blade_np = blade
 
     tip = game.box_model.copyTo(game.sword_pivot)
@@ -56,6 +60,7 @@ def setup_weapon_system(game) -> None:
     tip.clearTexture()
     tip.setTexture(game.level_checker_tex, 1)
     tip.setMaterial(game.sword_emissive_material, 1)
+    tip.setShaderOff(1)
     game.sword_tip_blade_np = tip
 
     glow = game.box_model.copyTo(game.sword_pivot)
@@ -70,6 +75,7 @@ def setup_weapon_system(game) -> None:
     glow.setLightOff(1)
     glow.clearTexture()
     glow.setMaterial(game.sword_emissive_material, 1)
+    glow.setShaderOff(1)
     game.sword_glow_np = glow
 
     game.sword_stripe_stage = TextureStage("sword-stripe-stage")
@@ -91,6 +97,7 @@ def setup_weapon_system(game) -> None:
         stripe.setDepthWrite(False)
         stripe.setLightOff(1)
         stripe.setMaterial(game.sword_emissive_material, 1)
+        stripe.setShaderOff(1)
         game.sword_stripe_nodes.append(stripe)
 
     game.sword_glow_light = PointLight("sword-glow-light")
@@ -168,6 +175,7 @@ def _spawn_blade_echo(game, sword_scale: float) -> None:
         return
 
     holder = game.world.attachNewNode("sword-blade-echo")
+    holder.setShaderOff(1)
     holder.setMat(game.render, blade_src.getMat(game.render))
 
     blade = game.box_model.copyTo(holder)
@@ -180,6 +188,7 @@ def _spawn_blade_echo(game, sword_scale: float) -> None:
     blade.setTransparency(TransparencyAttrib.MAlpha)
     blade.setDepthWrite(False)
     blade.setBin("transparent", 34)
+    blade.setShaderOff(1)
 
     colors = getattr(game, "sword_blade_echo_colors", None) or [(1.0, 1.0, 1.0)]
     idx = int(getattr(game, "sword_blade_echo_cycle", 0)) % len(colors)
@@ -235,6 +244,7 @@ def _spawn_swing_slash_trail(game, sword_scale: float, current_tip_pos: Vec3) ->
 
     mid = (Vec3(current_tip_pos) + Vec3(prev_tip)) * 0.5
     holder = game.world.attachNewNode("sword-slash-trail")
+    holder.setShaderOff(1)
     holder.setPos(mid)
     planar_len = math.sqrt(seg.x * seg.x + seg.y * seg.y)
     heading = math.degrees(math.atan2(-seg.x, seg.y)) if planar_len > 1e-8 else 0.0
@@ -251,6 +261,7 @@ def _spawn_swing_slash_trail(game, sword_scale: float, current_tip_pos: Vec3) ->
     trail.setDepthWrite(False)
     trail.setBin("transparent", 31)
     trail.setColor(0.24, 0.95, 1.0, 0.68)
+    trail.setShaderOff(1)
 
     game.sword_slash_nodes.append({"node": holder, "age": 0.0, "life": 0.14})
 
