@@ -341,7 +341,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Spawn multiple TCP clients for load testing.")
     parser.add_argument("--host", default="63.41.180.121")
     parser.add_argument("--port", type=int, default=8383)
-    parser.add_argument("--count", type=int, default=32)
+    parser.add_argument("--count", type=int, default=13)
     parser.add_argument("--rate", type=float, default=0.05, help="Seconds between input messages")
     parser.add_argument("--min-x", type=float, default=6.0)
     parser.add_argument("--max-x", type=float, default=60.0)

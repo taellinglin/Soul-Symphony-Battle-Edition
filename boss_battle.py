@@ -575,13 +575,13 @@ def begin_boss_room_encounter(game: Any) -> None:
     player_spawn_pos = Vec3(hub_pos.x, hub_pos.y - boss_offset, hub_top_z)
 
     wave_idx = max(1, int(getattr(game, "monster_wave_index", 1)))
-    boss_scale = min(1.3, 0.55 + 0.15 * max(0, wave_idx - 1))
+    boss_scale = min(1.2, 0.52 + 0.12 * max(0, wave_idx - 1))
     boss_scale = max(0.4, boss_scale)
     scale_alpha = (boss_scale - 0.55) / max(1e-6, (1.3 - 0.55))
-    burst_min = 0.35 - 0.2 * scale_alpha
-    burst_max = 0.8 - 0.45 * scale_alpha
-    ranged_min = 0.7 - 0.55 * scale_alpha
-    ranged_max = 1.3 - 0.95 * scale_alpha
+    burst_min = 0.4 - 0.18 * scale_alpha
+    burst_max = 0.9 - 0.4 * scale_alpha
+    ranged_min = 0.85 - 0.45 * scale_alpha
+    ranged_max = 1.5 - 0.85 * scale_alpha
 
     remote_players = getattr(game, "remote_players", None)
     if isinstance(remote_players, dict) and remote_players:
@@ -609,20 +609,20 @@ def begin_boss_room_encounter(game: Any) -> None:
         monster["boss_orbit_phase"] = random.uniform(0.0, math.tau)
         monster["boss_burst_timer"] = random.uniform(max(0.12, burst_min), max(0.24, burst_max))
         game._apply_monster_progression_stats(monster, boss_mode=True)
-        monster["hp_max"] = float(monster.get("hp_max", 1.0)) * 3.1 * boss_scale
+        monster["hp_max"] = float(monster.get("hp_max", 1.0)) * 2.7 * boss_scale
         monster["hp"] = float(monster.get("hp_max", 1.0))
-        monster["defense"] = max(0.35, float(monster.get("defense", 1.0)) * 1.35 * boss_scale)
-        monster["attack_mult"] = float(monster.get("attack_mult", 1.0)) * 3.2 * boss_scale
-        monster["speed_boost"] = max(1.0, float(monster.get("speed_boost", 1.0)) * (1.25 + 0.4 * boss_scale))
-        monster["ai_hunt_range"] = float(monster.get("ai_hunt_range", 11.5)) * (1.2 + 0.6 * boss_scale)
-        monster["ai_attack_range"] = float(monster.get("ai_attack_range", 2.0)) * (1.1 + 0.5 * boss_scale)
-        monster["ai_guard_range"] = float(monster.get("ai_guard_range", 17.0)) * (1.1 + 0.5 * boss_scale)
+        monster["defense"] = max(0.35, float(monster.get("defense", 1.0)) * 1.25 * boss_scale)
+        monster["attack_mult"] = float(monster.get("attack_mult", 1.0)) * 2.8 * boss_scale
+        monster["speed_boost"] = max(1.0, float(monster.get("speed_boost", 1.0)) * (1.2 + 0.32 * boss_scale))
+        monster["ai_hunt_range"] = float(monster.get("ai_hunt_range", 11.5)) * (1.15 + 0.5 * boss_scale)
+        monster["ai_attack_range"] = float(monster.get("ai_attack_range", 2.0)) * (1.05 + 0.45 * boss_scale)
+        monster["ai_guard_range"] = float(monster.get("ai_guard_range", 17.0)) * (1.05 + 0.45 * boss_scale)
         monster["is_boss"] = True
         monster["ranged_enabled"] = True
         monster["ranged_cooldown"] = random.uniform(max(0.12, ranged_min), max(0.24, ranged_max))
         vel = Vec3(monster.get("velocity", Vec3(0.0, 0.0, 0.0)))
         if vel.lengthSquared() > 1e-8:
-            monster["velocity"] = vel * (1.5 + 0.7 * boss_scale)
+            monster["velocity"] = vel * (1.4 + 0.6 * boss_scale)
 
     if hasattr(game, "ball_np") and game.ball_np is not None and (not game.ball_np.isEmpty()):
         game.ball_np.setPos(player_spawn_pos)

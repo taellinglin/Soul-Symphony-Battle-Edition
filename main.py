@@ -608,6 +608,8 @@ class SoulSymphony(ShowBase):
         self.game_over_countdown = self.game_over_auto_restart_seconds
         self.game_over_ui: NodePath | None = None
         self.game_over_prompt_text_node: TextNode | None = None
+        self.host_waiting_restart = False
+        self.spectator_target_id: str | None = None
         self.win_active = False
         self.win_ui: NodePath | None = None
         self.player_ai_enabled = True
@@ -786,9 +788,9 @@ class SoulSymphony(ShowBase):
         self.enemy_projectile_cooldown_min = 1.4
         self.enemy_projectile_cooldown_max = 2.8
         self.enemy_projectile_fire_chance = 0.45
-        self.boss_projectile_cooldown_min = 0.45
-        self.boss_projectile_cooldown_max = 0.9
-        self.boss_projectile_fire_chance = 0.7
+        self.boss_projectile_cooldown_min = 0.55
+        self.boss_projectile_cooldown_max = 1.05
+        self.boss_projectile_fire_chance = 0.62
         self.monster_retaliate_hp_threshold = 220.0
         self.network_menu_root: NodePath | None = None
         self.network_menu_frame = None
@@ -849,8 +851,8 @@ class SoulSymphony(ShowBase):
         self.monster_boss_entry_delay = 1.6
         self.monster_boss_entry_timer = 0.0
         self.monster_boss_scale = 1.0
-        self.monster_boss_player_scale = 0.6
-        self.monster_boss_wave_scale = 0.65
+        self.monster_boss_player_scale = 0.5
+        self.monster_boss_wave_scale = 0.58
         self.boss_arena_root: NodePath | None = None
         self.boss_arena_water_tag = "boss_arena"
         self.boss_arena_center = Vec3(0, 0, 0)
@@ -3425,6 +3427,77 @@ class SoulSymphony(ShowBase):
 
         return target + ray_dir * allowed
 
+    def _update_spectator_camera(self, dt: float) -> None:
+        entry = self._select_spectator_target()
+        if entry is None:
+            return
+        root = entry.get("root")
+        if root is None or root.isEmpty():
+            return
+
+        target_pos = root.getPos(self.render)
+        gravity_up = self._get_gravity_up()
+        ref_forward = Vec3(0, 1, 0)
+        if abs(ref_forward.dot(gravity_up)) > 0.95:
+            ref_forward = Vec3(1, 0, 0)
+        ref_forward = ref_forward - gravity_up * ref_forward.dot(gravity_up)
+        if ref_forward.lengthSquared() < 1e-8:
+            ref_forward = Vec3(1, 0, 0)
+        ref_forward.normalize()
+
+        heading_offset = 180.0 if self._is_ceiling_mode() else 0.0
+        yaw = math.radians(self.heading + heading_offset)
+        orbit_dir = self._rotate_around_axis(-ref_forward, gravity_up, yaw)
+        if orbit_dir.lengthSquared() < 1e-8:
+            orbit_dir = Vec3(0, -1, 0)
+        else:
+            orbit_dir.normalize()
+
+        target = target_pos + gravity_up * self.camera_height_offset
+        desired_cam_pos = target + orbit_dir * self.camera_follow_distance
+
+        if self.camera_smoothed_pos is None:
+            self.camera_smoothed_pos = Vec3(desired_cam_pos)
+        else:
+            alpha = 1.0 - math.exp(-dt * 8.5)
+            self.camera_smoothed_pos = self.camera_smoothed_pos + (desired_cam_pos - self.camera_smoothed_pos) * alpha
+
+        resolved_cam = self._resolve_camera_tight(target, self.camera_smoothed_pos)
+        resolved_cam = self._enforce_camera_above_ball(
+            target_pos,
+            resolved_cam,
+            gravity_up,
+            min_up_offset=max(0.5, self.camera_height_offset * 0.45),
+        )
+        resolved_cam = self._clamp_camera_to_current_room_bounds(resolved_cam, target_pos)
+
+        self.camera_smoothed_pos = Vec3(resolved_cam)
+        self.camera.setPos(self.camera_smoothed_pos)
+
+        if self.enable_scene_culling:
+            self.scene_cull_timer -= dt
+            if self.scene_cull_timer <= 0.0:
+                self._update_scene_culling(False)
+                self.scene_cull_timer = self.scene_cull_interval
+        elif self.scene_cull_hidden:
+            for vid in list(self.scene_cull_hidden):
+                visual = self.scene_visuals.get(vid)
+                if visual is not None and not visual.isEmpty():
+                    visual.unstash()
+            self.scene_cull_hidden.clear()
+            self.scene_cull_miss_counts.clear()
+
+        self.occlusion_update_timer -= dt
+        self.transparency_update_timer -= dt
+        if self.occlusion_update_timer <= 0.0:
+            self._update_camera_occlusion(self.camera_smoothed_pos, target_pos)
+            self.occlusion_update_timer = self.occlusion_update_interval
+        if self.transparency_update_timer <= 0.0:
+            self._refresh_visual_transparency()
+            self.transparency_update_timer = self.transparency_update_interval
+
+        self.camera.lookAt(target, gravity_up)
+
     def _enforce_camera_above_ball(self, ball_pos: Vec3, camera_pos: Vec3, up_axis: Vec3, min_up_offset: float = 0.55) -> Vec3:
         up = Vec3(up_axis)
         if up.lengthSquared() < 1e-8:
@@ -5753,7 +5826,7 @@ class SoulSymphony(ShowBase):
         nose.setColor(0.95, 1.0, 0.7, 0.98)
         nose.setScale(0.3, 0.3, 0.56)
         nose.setPos(0.0, 1.06, 0.0)
-        nose.setP(90.0)
+        nose.setP(-90.0)
         nose.setTransparency(TransparencyAttrib.MAlpha)
         nose.setLightOff(1)
         nose.setShaderOff(1)
@@ -8929,6 +9002,9 @@ class SoulSymphony(ShowBase):
         self._play_win_sfx()
 
     def _handle_wave_clear(self) -> None:
+        if bool(getattr(self, "host_waiting_restart", False)):
+            self._restart_after_game_over()
+            return
         if bool(getattr(self, "enable_boss_per_wave", False)):
             if not bool(getattr(self, "monster_boss_room_active", False)) and not bool(getattr(self, "monster_boss_pending", False)):
                 self.monster_boss_pending = True
@@ -9050,12 +9126,37 @@ class SoulSymphony(ShowBase):
                 if hasattr(self, "ball_body") and self.ball_body is not None:
                     self.ball_body.setLinearVelocity(Vec3(0, 0, 0))
                     self.ball_body.setAngularVelocity(Vec3(0, 0, 0))
+        return_pos = getattr(self, "boss_return_pos", None)
+        if return_pos is not None:
+            remote_players = getattr(self, "remote_players", None)
+            if isinstance(remote_players, dict) and remote_players:
+                radius = max(1.2, float(getattr(self, "ball_radius", 0.68)) * 3.0)
+                step = math.tau / max(1, len(remote_players))
+                for idx, entry in enumerate(remote_players.values()):
+                    if not isinstance(entry, dict):
+                        continue
+                    angle = step * idx
+                    pos = Vec3(
+                        float(return_pos.x) + math.cos(angle) * radius,
+                        float(return_pos.y) + math.sin(angle) * radius,
+                        float(return_pos.z),
+                    )
+                    entry["pos"] = Vec3(pos)
+                    entry["has_pos"] = True
+                    root = entry.get("root")
+                    if root is not None and not root.isEmpty():
+                        root.setPos(pos)
+        if bool(getattr(self, "host_waiting_restart", False)):
+            self._restart_after_game_over()
+            return
         self._clear_all_monsters()
         self._queue_next_wave()
 
     def _restart_after_game_over(self) -> None:
         if not getattr(self, "game_over_active", False) and not getattr(self, "win_active", False):
             return
+        self.host_waiting_restart = False
+        self.spectator_target_id = None
         if bool(getattr(self, "monster_boss_room_active", False)):
             self.monster_boss_room_active = False
             self.monster_boss_pending = False
@@ -12736,6 +12837,57 @@ class SoulSymphony(ShowBase):
             return max(1, 1 + len(getattr(self, "remote_players", {})))
         return 1
 
+    def _any_remote_player_alive(self) -> bool:
+        for entry in getattr(self, "remote_players", {}).values():
+            try:
+                hp = float(entry.get("hp", 0.0))
+            except Exception:
+                hp = 0.0
+            if hp > 0.0:
+                return True
+        return False
+
+    def _select_spectator_target(self) -> dict | None:
+        remote_players = getattr(self, "remote_players", {})
+        if not isinstance(remote_players, dict) or not remote_players:
+            self.spectator_target_id = None
+            return None
+
+        current_id = getattr(self, "spectator_target_id", None)
+        if current_id in remote_players:
+            entry = remote_players.get(current_id)
+            if isinstance(entry, dict):
+                try:
+                    hp = float(entry.get("hp", 0.0))
+                except Exception:
+                    hp = 0.0
+                root = entry.get("root")
+                if hp > 0.0 and root is not None and not root.isEmpty():
+                    return entry
+
+        best_id = None
+        best_entry = None
+        best_hp = -1.0
+        for client_id, entry in remote_players.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                hp = float(entry.get("hp", 0.0))
+            except Exception:
+                hp = 0.0
+            if hp <= 0.0:
+                continue
+            root = entry.get("root")
+            if root is None or root.isEmpty():
+                continue
+            if hp > best_hp:
+                best_hp = hp
+                best_id = client_id
+                best_entry = entry
+
+        self.spectator_target_id = best_id
+        return best_entry
+
     def _spawn_hypercube_monsters(self, count: int = 8) -> None:
         if not self.rooms:
             return
@@ -15432,6 +15584,17 @@ class SoulSymphony(ShowBase):
         if self.game_over_active or self.win_active:
             if self.game_over_active:
                 self._update_game_over_countdown(dt)
+            if (
+                self.game_over_active
+                and bool(getattr(self, "host_waiting_restart", False))
+                and self._any_remote_player_alive()
+            ):
+                self._process_network_messages()
+                self._update_remote_players(dt)
+                self._update_spectator_camera(dt)
+                self._update_local_name_label_screen_pos()
+                self.audio3d.update()
+                return task.cont
             if hasattr(self, "ball_body") and self.ball_body is not None:
                 self.ball_body.setLinearVelocity(Vec3(0, 0, 0))
                 self.ball_body.setAngularVelocity(Vec3(0, 0, 0))
