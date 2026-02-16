@@ -47,6 +47,7 @@ from level import BSPGenerator, GenerationConfig, Room
 from player import queue_jump
 from soundfx import load_first_sfx, play_sound
 from weapon_system import apply_attack_hits, setup_weapon_system, trigger_spin_attack, trigger_swing_attack, trigger_throw_attack, update_weapon_system
+from boss_battle import begin_boss_room_encounter
 from world import create_checker_texture, create_shadow_texture
 
 
@@ -3892,8 +3893,27 @@ class SoulSymphony(ShowBase):
             return
         self._start_random_bgm_loop()
 
+    def _has_giant_monster_alive(self) -> bool:
+        for monster in getattr(self, "monsters", []):
+            if monster.get("dead", False):
+                continue
+            if str(monster.get("variant", "")).lower() == "giant":
+                return True
+        return False
+
+    def _alive_monster_count(self) -> int:
+        count = 0
+        for monster in getattr(self, "monsters", []):
+            if monster.get("dead", False):
+                continue
+            count += 1
+        return count
+
+    def _compute_boss_music_active(self) -> bool:
+        return bool(getattr(self, "monster_boss_room_active", False))
+
     def _sync_bgm_state(self) -> None:
-        boss_active = bool(getattr(self, "monster_boss_room_active", False))
+        boss_active = self._compute_boss_music_active()
         self._set_bgm_mode("boss" if boss_active else "normal")
 
     def _start_random_bgm_loop(self) -> None:
@@ -7943,6 +7963,11 @@ class SoulSymphony(ShowBase):
         if snapshot:
             self.network_remote_monsters = snapshot
             self.network_remote_monster_time = float(getattr(self, "roll_time", 0.0))
+        if "boss_active" in msg:
+            try:
+                self.network_remote_boss_active = bool(msg.get("boss_active"))
+            except Exception:
+                pass
 
     def _send_monster_snapshot(self, dt: float) -> None:
         sock = self.network_socket
@@ -7972,6 +7997,7 @@ class SoulSymphony(ShowBase):
             "type": "monsters",
             "t": float(getattr(self, "roll_time", 0.0)),
             "monsters": monsters,
+            "boss_active": bool(getattr(self, "monster_boss_room_active", False)),
         }
         try:
             msg = (json.dumps(payload) + "\n").encode("utf-8")
@@ -7982,6 +8008,8 @@ class SoulSymphony(ShowBase):
     def _apply_remote_monster_snapshot(self) -> None:
         if not self.network_remote_monsters:
             return
+        if not self.network_is_host and hasattr(self, "network_remote_boss_active"):
+            self._set_bgm_mode("boss" if bool(getattr(self, "network_remote_boss_active", False)) else "normal")
         for idx, monster in enumerate(getattr(self, "monsters", [])):
             entry = self.network_remote_monsters.get(idx)
             if not entry:
@@ -8660,6 +8688,11 @@ class SoulSymphony(ShowBase):
         self._play_win_sfx()
 
     def _handle_wave_clear(self) -> None:
+        if bool(getattr(self, "enable_boss_per_wave", False)):
+            if not bool(getattr(self, "monster_boss_room_active", False)) and not bool(getattr(self, "monster_boss_pending", False)):
+                self.monster_boss_pending = True
+                self.monster_boss_entry_timer = float(getattr(self, "monster_boss_entry_delay", 1.6))
+            return
         if bool(getattr(self, "enable_wave_respawn", False)):
             self._play_win_sfx(force=True)
             self._queue_next_wave()
@@ -8708,14 +8741,20 @@ class SoulSymphony(ShowBase):
         self._spawn_hypercube_monsters(count=count)
         self._attach_monster_hum_sounds()
         self._setup_monster_ai_system()
-        if hasattr(self, "ball_np") and self.ball_np is not None:
-            self._spawn_floating_text(
-                self.ball_np.getPos() + Vec3(0, 0, 1.0),
-                f"WAVE {wave_idx}",
-                (0.45, 0.95, 1.0, 1.0),
-                scale=0.35,
-                life=1.15,
-            )
+
+    def _clear_all_monsters(self) -> None:
+        self._teardown_monster_ai_system()
+        for monster in self.monsters:
+            root = monster.get("root")
+            if root is not None and not root.isEmpty():
+                root.removeNode()
+            hum = monster.get("hum_sfx")
+            if hum:
+                hum.stop()
+        self.monsters = []
+        self.monsters_slain = 0
+        self.monsters_total = 0
+        self._update_monster_hud_ui()
 
     def _update_wave_respawn(self, dt: float) -> None:
         if not bool(getattr(self, "enable_wave_respawn", False)):
@@ -8729,6 +8768,41 @@ class SoulSymphony(ShowBase):
         self.monster_wave_respawn_timer = timer
         if timer <= 0.0:
             self._start_next_wave()
+
+    def _update_boss_entry(self, dt: float) -> None:
+        if not bool(getattr(self, "enable_boss_per_wave", False)):
+            return
+        if bool(getattr(self, "monster_boss_room_active", False)):
+            return
+        if not bool(getattr(self, "monster_boss_pending", False)):
+            return
+        timer = float(getattr(self, "monster_boss_entry_timer", 0.0))
+        if timer > 0.0:
+            timer = max(0.0, timer - max(0.0, float(dt)))
+            self.monster_boss_entry_timer = timer
+        if timer <= 0.0:
+            begin_boss_room_encounter(self)
+
+    def _update_boss_defeat(self) -> None:
+        if not bool(getattr(self, "monster_boss_room_active", False)):
+            return
+        if self._alive_monster_count() > 0:
+            return
+        self.monster_boss_room_active = False
+        self.monster_boss_defeated = True
+        self.monster_boss_pending = False
+        self.monster_boss_entry_timer = 0.0
+        self._set_bgm_mode("normal")
+        cleanup_boss_room(self)
+        if hasattr(self, "ball_np") and self.ball_np is not None and not self.ball_np.isEmpty():
+            return_pos = getattr(self, "boss_return_pos", None)
+            if return_pos is not None:
+                self.ball_np.setPos(Vec3(return_pos))
+                if hasattr(self, "ball_body") and self.ball_body is not None:
+                    self.ball_body.setLinearVelocity(Vec3(0, 0, 0))
+                    self.ball_body.setAngularVelocity(Vec3(0, 0, 0))
+        self._clear_all_monsters()
+        self._queue_next_wave()
 
     def _restart_after_game_over(self) -> None:
         if not getattr(self, "game_over_active", False) and not getattr(self, "win_active", False):
@@ -12693,6 +12767,30 @@ class SoulSymphony(ShowBase):
         self._update_monster_hud_ui()
         print(f"Spawned monsters: {self.monster_spawn_count} ({approx_per_room} per room across {room_total} rooms)")
 
+    def _apply_monster_progression_stats(self, monster: dict, boss_mode: bool = False) -> None:
+        wave_idx = max(1, int(getattr(self, "monster_wave_index", 1)))
+        wave_power = max(0, wave_idx - 1)
+        wave_hp_mul = 1.0 + wave_power * float(getattr(self, "monster_wave_hp_scale", 0.12))
+        wave_speed_mul = 1.0 + wave_power * float(getattr(self, "monster_wave_speed_scale", 0.06))
+        wave_def_mul = 1.0 + wave_power * float(getattr(self, "monster_wave_defense_scale", 0.08))
+        wave_attack_mul = 1.0 + wave_power * float(getattr(self, "monster_wave_attack_scale", 0.08))
+
+        if boss_mode:
+            wave_hp_mul *= max(1.0, float(getattr(self, "monster_boss_scale", 1.0)))
+            wave_def_mul *= 1.2
+            wave_attack_mul *= 1.2
+
+        hp_max = float(monster.get("hp_max", self.monster_max_hp)) * wave_hp_mul
+        monster["hp_max"] = hp_max
+        monster["hp"] = min(float(monster.get("hp", hp_max)), hp_max)
+        monster["defense"] = max(0.35, float(monster.get("defense", 1.0)) * wave_def_mul)
+        monster["attack_mult"] = float(monster.get("attack_mult", 1.0)) * wave_attack_mul
+        vel = Vec3(monster.get("velocity", Vec3(0, 0, 0)))
+        if vel.lengthSquared() > 1e-8:
+            vel.normalize()
+            speed = max(0.25, vel.length() * wave_speed_mul)
+            monster["velocity"] = vel * speed
+
     def _monster_move_blocked(self, start: Vec3, end: Vec3, radius: float) -> bool:
         if (end - start).lengthSquared() < 1e-10:
             return False
@@ -14912,6 +15010,8 @@ class SoulSymphony(ShowBase):
         self.roll_time += dt
         self.voiceover_timer = max(0.0, float(getattr(self, "voiceover_timer", 0.0)) - dt)
         self._update_wave_respawn(dt)
+        self._update_boss_entry(dt)
+        self._update_boss_defeat()
         #self._update_water_surface_waves(self.roll_time)
         self._update_water_crystals(dt)
         self._update_ball_texture_scroll(dt)

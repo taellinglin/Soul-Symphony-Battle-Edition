@@ -69,6 +69,14 @@ def _clear_boss_room_arena(game: Any) -> None:
         root.removeNode()
     game.boss_room_arena_root = None
     game.boss_room_shader_nodes = []
+    for node in list(getattr(game, "boss_room_water_nodes", [])):
+        if node is None or node.isEmpty():
+            continue
+        try:
+            node.removeNode()
+        except Exception:
+            pass
+    game.boss_room_water_nodes = []
 
 
 def _hex_contains_xy(x: float, y: float, radius: float) -> bool:
@@ -125,6 +133,8 @@ def _stash_world_for_boss(game: Any) -> None:
         if not node.isStashed():
             node.stash()
             hidden_nodes.append(node)
+    game.boss_room_prev_water_surfaces = list(getattr(game, "water_surfaces", []))
+    game.water_surfaces = []
     game.boss_room_hidden_visual_ids = hidden_ids
     game.boss_room_hidden_nodes = hidden_nodes
 
@@ -143,6 +153,9 @@ def _restore_world_after_boss(game: Any) -> None:
             node.unstash()
     game.boss_room_hidden_visual_ids = set()
     game.boss_room_hidden_nodes = []
+    if hasattr(game, "boss_room_prev_water_surfaces"):
+        game.water_surfaces = list(getattr(game, "boss_room_prev_water_surfaces", []))
+        game.boss_room_prev_water_surfaces = []
     game.enable_scene_culling = bool(getattr(game, "boss_room_prev_scene_culling", True))
     game.enable_wall_occlusion_culling = bool(getattr(game, "boss_room_prev_wall_occlusion", True))
     game.boss_room_prev_scene_culling = True
@@ -165,7 +178,7 @@ def _build_hex_boss_arena(game: Any, room_idx: int, center: Vec3) -> None:
 
     room = game.rooms[room_idx]
     room_span = max(8.2, min(room.w, room.h) * 0.72)
-    arena_radius = max(12.0, min(24.0, room_span * 1.7))
+    arena_radius = max(8.0, min(14.0, room_span * 0.95))
     wall_thickness = 0.95
     wall_height = max(6.2, min(12.5, game.wall_h * 1.8))
     side_length = max(2.8, arena_radius)
@@ -174,8 +187,33 @@ def _build_hex_boss_arena(game: Any, room_idx: int, center: Vec3) -> None:
     wall_tex = game.level_checker_tex
     ceiling_tex = getattr(game, "water_base_tex", wall_tex)
 
+    water_plane = game._add_box(
+        Vec3(0.0, 0.0, -3.2),
+        Vec3(arena_radius * 1.25, arena_radius * 1.25, 0.18),
+        color=(0.12, 0.2, 0.28, 1.0),
+        parent=root,
+        collidable=False,
+        surface_mode="water",
+    )
+    water_plane.setTag("boss_water", "1")
+    if getattr(game, "water_surface_shader", None) is not None:
+        try:
+            water_plane.setShader(game.water_surface_shader)
+            game._apply_water_surface_room_texture(water_plane)
+        except Exception:
+            pass
+    game._register_water_surface(
+        water_plane,
+        -arena_radius * 1.25,
+        arena_radius * 1.25,
+        -arena_radius * 1.25,
+        arena_radius * 1.25,
+        center.z - 3.2,
+    )
+    game.boss_room_water_nodes = [water_plane]
+
     floor_base = game._add_box(
-        Vec3(0.0, 0.0, -1.12),
+        Vec3(0.0, 0.0, -0.6),
         Vec3(arena_radius * 1.06, arena_radius * 1.06, 0.6),
         color=(0.58, 0.82, 1.0, 1.0),
         parent=root,
@@ -187,7 +225,7 @@ def _build_hex_boss_arena(game: Any, room_idx: int, center: Vec3) -> None:
     tile_span = max(1.3, arena_radius / 8.0)
     tile_half_xy = tile_span * 0.52
     grid_steps = max(5, int(arena_radius / tile_span) + 2)
-    base_z = -1.82
+    base_z = -0.82
     for ix in range(-grid_steps, grid_steps + 1):
         x = ix * tile_span
         for iy in range(-grid_steps, grid_steps + 1):
@@ -301,6 +339,8 @@ def choose_boss_room_index(game: Any) -> int:
 def begin_boss_room_encounter(game: Any) -> None:
     if not game.rooms:
         return
+    if hasattr(game, "ball_np") and game.ball_np is not None and not game.ball_np.isEmpty():
+        game.boss_return_pos = Vec3(game.ball_np.getPos())
     game.monster_boss_room_active = True
     game.monster_boss_pending = False
     game.monster_boss_defeated = False
@@ -329,6 +369,13 @@ def begin_boss_room_encounter(game: Any) -> None:
         monster["boss_orbit_phase"] = random.uniform(0.0, math.tau)
         monster["boss_burst_timer"] = random.uniform(0.35, 0.8)
         game._apply_monster_progression_stats(monster, boss_mode=True)
+        monster["hp_max"] = float(monster.get("hp_max", 1.0)) * 3.5
+        monster["hp"] = float(monster.get("hp_max", 1.0))
+        monster["defense"] = max(0.35, float(monster.get("defense", 1.0)) * 1.6)
+        monster["attack_mult"] = float(monster.get("attack_mult", 1.0)) * 2.2
+        vel = Vec3(monster.get("velocity", Vec3(0.0, 0.0, 0.0)))
+        if vel.lengthSquared() > 1e-8:
+            monster["velocity"] = vel * 1.4
 
     if hasattr(game, "ball_np") and game.ball_np is not None and (not game.ball_np.isEmpty()):
         player_spawn = game._safe_room_spawn_pos(boss_room_idx, z_lift=0.34)
@@ -360,6 +407,13 @@ def update_monster_progression(game: Any, dt: float) -> None:
             game._set_bgm_mode("normal")
         _clear_boss_room_arena(game)
         _restore_world_after_boss(game)
+        if hasattr(game, "ball_np") and game.ball_np is not None and not game.ball_np.isEmpty():
+            return_pos = getattr(game, "boss_return_pos", None)
+            if return_pos is not None:
+                game.ball_np.setPos(Vec3(return_pos))
+                if hasattr(game, "ball_body") and game.ball_body is not None:
+                    game.ball_body.setLinearVelocity(Vec3(0, 0, 0))
+                    game.ball_body.setAngularVelocity(Vec3(0, 0, 0))
         game.monster_wave_index += 1
         game.monster_level_current = min(int(getattr(game, "monster_level_cap", 150)), int(getattr(game, "monster_level_current", 1)) + 1)
         game.monster_respawn_timer = float(getattr(game, "monster_respawn_delay", 1.1))
