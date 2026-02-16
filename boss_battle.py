@@ -259,6 +259,11 @@ def _build_hex_boss_arena(game: Any, room_idx: int, center: Vec3) -> None:
         w_coord=0.0,
         surface_mode="floor",
     )
+    if hub is not None and not hub.isEmpty():
+        hub.clearTexture()
+        hub.setTextureOff(1)
+        if hasattr(game, "_apply_room_thermal_shader"):
+            game._apply_room_thermal_shader(hub)
     hub_collider = game._add_static_box_collider(
         center + Vec3(0.0, 0.0, 2.6),
         Vec3(hub_half),
@@ -302,6 +307,11 @@ def _build_hex_boss_arena(game: Any, room_idx: int, center: Vec3) -> None:
                 w_coord=w_coord,
                 surface_mode="floor",
             )
+            if plat is not None and not plat.isEmpty():
+                plat.clearTexture()
+                plat.setTextureOff(1)
+                if hasattr(game, "_apply_room_thermal_shader"):
+                    game._apply_room_thermal_shader(plat)
             plat_collider = game._add_static_box_collider(
                 center + Vec3(x, y, z),
                 Vec3(hx, hy, hz),
@@ -342,6 +352,11 @@ def _build_hex_boss_arena(game: Any, room_idx: int, center: Vec3) -> None:
                     w_coord=w_coord,
                     surface_mode="floor",
                 )
+                if pillar is not None and not pillar.isEmpty():
+                    pillar.clearTexture()
+                    pillar.setTextureOff(1)
+                    if hasattr(game, "_apply_room_thermal_shader"):
+                        game._apply_room_thermal_shader(pillar)
                 pillar_collider = game._add_static_box_collider(
                     center + Vec3(x, y, z + hz + pillar_h * 0.5),
                     Vec3(0.22, 0.22, pillar_h * 0.5),
@@ -360,6 +375,32 @@ def _build_hex_boss_arena(game: Any, room_idx: int, center: Vec3) -> None:
     )
     game.boss_room_arena_collider_nodes.append(top_collider)
     game.boss_room_arena_collider_nodes.append(bottom_collider)
+
+    wall_t = max(0.6, float(getattr(game, "wall_t", 1.0)))
+    wall_half_z = max(2.0, (float(getattr(game, "hyper_bounds_top_z", floor_y + 40.0)) - float(getattr(game, "hyper_bounds_bottom_z", floor_y - 40.0))) * 0.5 + 2.0)
+    wall_center_z = (float(getattr(game, "hyper_bounds_top_z", floor_y + 40.0)) + float(getattr(game, "hyper_bounds_bottom_z", floor_y - 40.0))) * 0.5
+    wall_x = map_w_used * 0.5 + wall_t
+    wall_y = map_d_used * 0.5 + wall_t
+    wall_pos_z = wall_center_z
+    wall_scale_x = Vec3(wall_t, map_d_used * 0.5 + wall_t, wall_half_z)
+    wall_scale_y = Vec3(map_w_used * 0.5 + wall_t, wall_t, wall_half_z)
+    wall_left = game._add_static_box_collider(
+        Vec3(center.x - wall_x, center.y, wall_pos_z),
+        Vec3(wall_scale_x),
+    )
+    wall_right = game._add_static_box_collider(
+        Vec3(center.x + wall_x, center.y, wall_pos_z),
+        Vec3(wall_scale_x),
+    )
+    wall_down = game._add_static_box_collider(
+        Vec3(center.x, center.y - wall_y, wall_pos_z),
+        Vec3(wall_scale_y),
+    )
+    wall_up = game._add_static_box_collider(
+        Vec3(center.x, center.y + wall_y, wall_pos_z),
+        Vec3(wall_scale_y),
+    )
+    game.boss_room_arena_collider_nodes.extend([wall_left, wall_right, wall_down, wall_up])
 
     game.boss_room_arena_center = Vec3(center)
     game.boss_room_arena_radius = arena_radius_max
@@ -533,6 +574,15 @@ def begin_boss_room_encounter(game: Any) -> None:
     boss_spawn_pos = Vec3(hub_pos.x, hub_pos.y + boss_offset, hub_top_z)
     player_spawn_pos = Vec3(hub_pos.x, hub_pos.y - boss_offset, hub_top_z)
 
+    wave_idx = max(1, int(getattr(game, "monster_wave_index", 1)))
+    boss_scale = min(1.3, 0.55 + 0.15 * max(0, wave_idx - 1))
+    boss_scale = max(0.4, boss_scale)
+    scale_alpha = (boss_scale - 0.55) / max(1e-6, (1.3 - 0.55))
+    burst_min = 0.35 - 0.2 * scale_alpha
+    burst_max = 0.8 - 0.45 * scale_alpha
+    ranged_min = 0.7 - 0.55 * scale_alpha
+    ranged_max = 1.3 - 0.95 * scale_alpha
+
     remote_players = getattr(game, "remote_players", None)
     if isinstance(remote_players, dict) and remote_players:
         ring_radius = max(1.6, hub_half.y * 0.9)
@@ -557,19 +607,22 @@ def begin_boss_room_encounter(game: Any) -> None:
         monster["room_idx"] = boss_room_idx
         monster["level"] = min(int(getattr(game, "monster_level_cap", 150)), max(1, int(getattr(game, "monster_level_current", 1)) + 7))
         monster["boss_orbit_phase"] = random.uniform(0.0, math.tau)
-        monster["boss_burst_timer"] = random.uniform(0.2, 0.5)
+        monster["boss_burst_timer"] = random.uniform(max(0.12, burst_min), max(0.24, burst_max))
         game._apply_monster_progression_stats(monster, boss_mode=True)
-        monster["hp_max"] = float(monster.get("hp_max", 1.0)) * 2.6
+        monster["hp_max"] = float(monster.get("hp_max", 1.0)) * 3.1 * boss_scale
         monster["hp"] = float(monster.get("hp_max", 1.0))
-        monster["defense"] = max(0.35, float(monster.get("defense", 1.0)) * 1.2)
-        monster["attack_mult"] = float(monster.get("attack_mult", 1.0)) * 2.8
-        monster["speed_boost"] = max(1.0, float(monster.get("speed_boost", 1.0)) * 1.45)
-        monster["ai_hunt_range"] = float(monster.get("ai_hunt_range", 11.5)) * 1.45
-        monster["ai_attack_range"] = float(monster.get("ai_attack_range", 2.0)) * 1.35
-        monster["ai_guard_range"] = float(monster.get("ai_guard_range", 17.0)) * 1.35
+        monster["defense"] = max(0.35, float(monster.get("defense", 1.0)) * 1.35 * boss_scale)
+        monster["attack_mult"] = float(monster.get("attack_mult", 1.0)) * 3.2 * boss_scale
+        monster["speed_boost"] = max(1.0, float(monster.get("speed_boost", 1.0)) * (1.25 + 0.4 * boss_scale))
+        monster["ai_hunt_range"] = float(monster.get("ai_hunt_range", 11.5)) * (1.2 + 0.6 * boss_scale)
+        monster["ai_attack_range"] = float(monster.get("ai_attack_range", 2.0)) * (1.1 + 0.5 * boss_scale)
+        monster["ai_guard_range"] = float(monster.get("ai_guard_range", 17.0)) * (1.1 + 0.5 * boss_scale)
+        monster["is_boss"] = True
+        monster["ranged_enabled"] = True
+        monster["ranged_cooldown"] = random.uniform(max(0.12, ranged_min), max(0.24, ranged_max))
         vel = Vec3(monster.get("velocity", Vec3(0.0, 0.0, 0.0)))
         if vel.lengthSquared() > 1e-8:
-            monster["velocity"] = vel * 1.9
+            monster["velocity"] = vel * (1.5 + 0.7 * boss_scale)
 
     if hasattr(game, "ball_np") and game.ball_np is not None and (not game.ball_np.isEmpty()):
         game.ball_np.setPos(player_spawn_pos)
@@ -627,13 +680,13 @@ def apply_boss_hypercube_motion(game: Any, monster: dict, pos: Vec3, ball_pos: V
     if to_player.lengthSquared() > 1e-8:
         to_player.normalize()
         side = Vec3(-to_player.y, to_player.x, 0.0)
-        orbit_push = side * (2.1 + 0.9 * math.sin(game.roll_time * 2.4 + boss_phase))
-        pos += orbit_push * dt * 0.42
+        orbit_push = side * (2.4 + 1.1 * math.sin(game.roll_time * 2.6 + boss_phase))
+        pos += orbit_push * dt * 0.6
     burst = max(0.0, float(monster.get("boss_burst_timer", 0.0)) - dt)
     monster["boss_burst_timer"] = burst
     if burst <= 0.0 and to_player.lengthSquared() > 1e-8:
-        dash = to_player * random.uniform(1.4, 2.7)
+        dash = to_player * random.uniform(2.0, 3.6)
         pos += dash
-        monster["boss_burst_timer"] = random.uniform(0.5, 1.2)
+        monster["boss_burst_timer"] = random.uniform(0.35, 0.8)
         monster["w_vel"] += random.uniform(-2.2, 2.2)
     return pos
