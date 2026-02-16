@@ -763,6 +763,39 @@ class SoulSymphony(ShowBase):
         self.monster_fast_speed_min = 2.0
         self.monster_fast_speed_max = 3.4
         self.monster_contact_sfx_cooldown = 0.0
+        self.enemy_projectiles: list[dict] = []
+        self.enemy_projectile_speed = 36.0
+        self.enemy_projectile_life = 2.6
+        self.enemy_projectile_damage = 14.0
+        self.enemy_projectile_min_range = 6.0
+        self.enemy_projectile_max_range = 28.0
+        self.enemy_projectile_cooldown_min = 1.4
+        self.enemy_projectile_cooldown_max = 2.8
+        self.enemy_projectile_fire_chance = 0.45
+        self.enable_wave_respawn = True
+        self.monster_wave_index = 1
+        self.monster_wave_respawn_delay = 3.0
+        self.monster_wave_respawn_timer = 0.0
+        self.monster_wave_count_base = 8
+        self.monster_wave_count_scale = 0.12
+        self.monster_wave_hp_scale = 0.12
+        self.monster_wave_speed_scale = 0.06
+        self.monster_wave_defense_scale = 0.08
+        self.monster_wave_attack_scale = 0.08
+        self.player_level = 1
+        self.player_xp = 0.0
+        self.player_xp_next = 12.0
+        self.player_xp_growth = 1.28
+        self.player_level_cycle = ["attack", "defense", "dex", "sta", "int"]
+        self.player_level_cycle_idx = 0
+        self.voiceover_min_gap = 0.9
+        self.voiceover_timer = 0.0
+        self.voiceover_active_clip = None
+        self.monster_active_range = 46.0
+        self.monster_inactive_glow_base_dim = 0.55
+        self.monster_inactive_glow_gain = 2.0
+        self.monster_inactive_glow_timer_min = 1.2
+        self.monster_inactive_glow_timer_max = 3.6
         self.hyper_uv_nodes: list[dict] = []
         self.dynamic_room_uv_nodes: list[dict] = []
         self.floor_contact_pulses: list[dict] = []
@@ -822,6 +855,15 @@ class SoulSymphony(ShowBase):
         self.monster_ai_jump_impulse = 4.8
         self.monster_ai_jump_gravity = 12.0
         self.monster_ai_jump_cooldown_duration = 0.9
+        self.sfx_water_loop = None
+        self.water_loop_active = False
+        self.exp_orbs: list[dict] = []
+        self.exp_orb_serial = 0
+        self.exp_orb_pickup_radius = 0.6
+        self.exp_orb_value_min = 1.0
+        self.exp_orb_value_max = 3.2
+        self.exp_orb_attract_radius = 6.8
+        self.exp_orb_attract_speed = 18.5
 
         self.level_texgen_mode = None
         self.ball_texgen_mode = None
@@ -988,7 +1030,8 @@ class SoulSymphony(ShowBase):
         self._initialize_infinite_world_goal()
         self._setup_weapon()
         self._setup_magic_missile_visuals()
-        self._spawn_hypercube_monsters(count=64)
+        base_count = int(getattr(self, "monster_wave_count_base", 64))
+        self._spawn_hypercube_monsters(count=base_count)
         self._setup_monster_ai_system()
         self._setup_ball_outline()
         if self.enable_ball_shadow:
@@ -1096,8 +1139,17 @@ class SoulSymphony(ShowBase):
             "pickup_health",
             "pickup",
             "healthpickup",
+            "soundfx/pickup",
             "soundfx/pickuphealth",
             "sfx/pickuphealth",
+        ])
+        self.sfx_water_loop = self._load_first_sfx_2d([
+            "water",
+            "water_loop",
+            "soundfx/water",
+            "soundfx/water_loop",
+            "sfx/water",
+            "sfx/water_loop",
         ])
         self.sfx_attack = self._load_first_sfx_2d([
             "attack",
@@ -1149,6 +1201,8 @@ class SoulSymphony(ShowBase):
         self.sfx_game_over_last = None
         self.sfx_win_bank = self._load_win_sfx_bank()
         self.sfx_win_last = None
+        self.sfx_levelup_bank = self._load_levelup_sfx_bank()
+        self.sfx_levelup_last = None
         self.voiceover_volume_scale = 0.5
         self.sfx_attackbomb_path = self._resolve_attackbomb_path()
         self.sfx_monster_hum_path = self._resolve_monster_hum_path()
@@ -1182,6 +1236,12 @@ class SoulSymphony(ShowBase):
             self.audio3d.setSoundMaxDistance(self.sfx_jump, 85.0)
             if hasattr(self.audio3d, "setSoundVelocityAuto"):
                 self.audio3d.setSoundVelocityAuto(self.sfx_jump)
+        if self.sfx_water_loop:
+            self.audio3d.attachSoundToObject(self.sfx_water_loop, self.ball_np)
+            self.audio3d.setSoundMinDistance(self.sfx_water_loop, 1.0)
+            self.audio3d.setSoundMaxDistance(self.sfx_water_loop, 95.0)
+            if hasattr(self.audio3d, "setSoundVelocityAuto"):
+                self.audio3d.setSoundVelocityAuto(self.sfx_water_loop)
 
         if self.sfx_roll:
             self.sfx_roll.setLoop(True)
@@ -1578,10 +1638,10 @@ class SoulSymphony(ShowBase):
             self.camera.lookAt(self.ball_np.getPos(self.render) + gravity_up * self.camera_height_offset, gravity_up)
             self.camera_smoothed_pos = Vec3(self.camera.getPos(self.render))
         if hasattr(self, "fog") and self.fog is not None:
-            self.fog.setColor(0.035, 0.045, 0.075)
-            self.fog.setLinearRange(1.2, 20.0)
-            self.fog_start = 1.2
-            self.fog_end = 20.0
+            self.fog.setColor(0.0, 0.0, 0.0)
+            self.fog.setLinearRange(0., 35.0)
+            self.fog_start = 0.0
+            self.fog_end = 35.0
         if hasattr(self, "ball_np"):
             ball_pos = self.ball_np.getPos()
             self.camera.setPos(self._clamp_camera_to_current_room_bounds(self.camera.getPos(), ball_pos))
@@ -1741,12 +1801,8 @@ class SoulSymphony(ShowBase):
         player_w = float(getattr(self, "player_w", 0.0))
         corridor_w = max(1.0, float(getattr(self, "corridor_w", 16.0)))
         level_z_step = max(0.1, float(getattr(self, "level_z_step", 6.0)))
-        map_w = max(1.0, float(getattr(self, "map_w", 1.0)))
-        map_d = max(1.0, float(getattr(self, "map_d", 1.0)))
-        reflection_scale = (1.0, -1.0)
-        reflection_offset = (0.0, 1.0)
         reflection_tex = getattr(self, "water_reflection_tex", None)
-        reflection_strength = 0.6 if reflection_tex is not None else 0.0
+        reflection_strength = 1.0 if reflection_tex is not None else 0.0
         fog = getattr(self, "fog", None)
         if fog is not None:
             fog_color = fog.getColor()
@@ -1757,6 +1813,18 @@ class SoulSymphony(ShowBase):
             fog_start, fog_end = (1.0e6, 1.0e6 + 1.0)
         for node in self.water_shader_nodes:
             if node is None or node.isEmpty():
+                continue
+            net_shader = None
+            try:
+                net_shader = node.getNetShader()
+            except Exception:
+                net_shader = node.getShader()
+            if net_shader != self.water_surface_shader:
+                try:
+                    node.clearShaderInput("u_reflection_tex")
+                    node.clearShaderInput("u_reflection_strength")
+                except Exception:
+                    pass
                 continue
             node.setShaderInput("u_time", self.roll_time)
             node.setShaderInput("u_uv_scale", uv_scale)
@@ -1781,8 +1849,6 @@ class SoulSymphony(ShowBase):
             node.setShaderInput("u_fog_end", float(fog_end))
             if reflection_tex is not None:
                 node.setShaderInput("u_reflection_tex", reflection_tex)
-            node.setShaderInput("u_reflection_scale", reflection_scale)
-            node.setShaderInput("u_reflection_offset", reflection_offset)
             node.setShaderInput("u_reflection_strength", reflection_strength)
             keep.append(node)
         self.water_shader_nodes = keep
@@ -3486,7 +3552,7 @@ class SoulSymphony(ShowBase):
             return
         self.sfx_game_over_last = clip
         vol = 0.9 * float(getattr(self, "voiceover_volume_scale", 1.0))
-        self._play_sound(clip, volume=vol, play_rate=1.0)
+        self._play_voiceover_sfx(clip, volume=vol, play_rate=1.0)
 
     def _load_win_sfx_bank(self) -> list:
         bank: list = []
@@ -3513,7 +3579,7 @@ class SoulSymphony(ShowBase):
                 bank.append(sfx)
         return bank
 
-    def _play_win_sfx(self) -> None:
+    def _play_win_sfx(self, force: bool = False) -> None:
         bank = getattr(self, "sfx_win_bank", None)
         if not bank:
             return
@@ -3529,7 +3595,7 @@ class SoulSymphony(ShowBase):
             return
         self.sfx_win_last = clip
         vol = 0.92 * float(getattr(self, "voiceover_volume_scale", 1.0))
-        self._play_sound(clip, volume=vol, play_rate=1.0)
+        self._play_voiceover_sfx(clip, volume=vol, play_rate=1.0, force=force)
 
     def _load_kill_sfx_bank(self) -> list:
         bank: list = []
@@ -3572,8 +3638,7 @@ class SoulSymphony(ShowBase):
             return False
         self.sfx_kill_last = clip
         vol = 0.9 * float(getattr(self, "voiceover_volume_scale", 1.0))
-        self._play_sound(clip, volume=vol, play_rate=1.0)
-        return True
+        return self._play_voiceover_sfx(clip, volume=vol, play_rate=1.0)
 
     def _load_critical_damage_sfx_bank(self) -> list:
         bank: list = []
@@ -3616,8 +3681,51 @@ class SoulSymphony(ShowBase):
             return False
         self.sfx_critical_damage_last = clip
         vol = 0.95 * float(getattr(self, "voiceover_volume_scale", 1.0))
-        self._play_sound(clip, volume=vol, play_rate=1.0 + random.uniform(-0.02, 0.02))
-        return True
+        return self._play_voiceover_sfx(clip, volume=vol, play_rate=1.0 + random.uniform(-0.02, 0.02))
+
+    def _load_levelup_sfx_bank(self) -> list:
+        bank: list = []
+        folder = os.path.join("soundfx", "levelup_")
+        if not os.path.isdir(folder):
+            return bank
+
+        try:
+            names = sorted(os.listdir(folder))
+        except Exception:
+            return bank
+
+        for name in names:
+            if not name.lower().endswith(".wav"):
+                continue
+            path = os.path.join(folder, name).replace("\\", "/")
+            if not os.path.exists(path):
+                continue
+            try:
+                sfx = self.loader.loadSfx(path)
+            except Exception:
+                sfx = None
+            if sfx:
+                bank.append(sfx)
+        return bank
+
+    def _play_levelup_sfx(self) -> bool:
+        bank = getattr(self, "sfx_levelup_bank", None)
+        if not bank:
+            return False
+        candidates = bank
+        last_clip = getattr(self, "sfx_levelup_last", None)
+        if last_clip is not None and len(bank) > 1:
+            filtered = [clip for clip in bank if clip is not last_clip]
+            if filtered:
+                candidates = filtered
+        try:
+            clip = random.choice(candidates)
+        except Exception:
+            return False
+        self.sfx_levelup_last = clip
+        vol = 0.95 * float(getattr(self, "voiceover_volume_scale", 1.0))
+        self.voiceover_timer = 0.0
+        return self._play_voiceover_sfx(clip, volume=vol, play_rate=1.0)
 
     def _collect_bgm_tracks(self) -> list[str]:
         bgm_dir = "bgm"
@@ -3688,6 +3796,22 @@ class SoulSymphony(ShowBase):
         norm_volume = volume * (1.0 - 0.32 * mix) + 0.2 * mix
         norm_rate = play_rate * (1.0 - 0.26 * mix) + 1.0 * (0.26 * mix)
         play_sound(sound, norm_volume, norm_rate)
+
+    def _play_voiceover_sfx(self, clip, volume: float, play_rate: float, force: bool = False) -> bool:
+        if clip is None:
+            return False
+        if not force and float(getattr(self, "voiceover_timer", 0.0)) > 0.0:
+            return False
+        active = getattr(self, "voiceover_active_clip", None)
+        if active is not None and active is not clip:
+            try:
+                active.stop()
+            except Exception:
+                pass
+        self.voiceover_active_clip = clip
+        self.voiceover_timer = float(getattr(self, "voiceover_min_gap", 0.9))
+        self._play_sound(clip, volume=volume, play_rate=play_rate)
+        return True
 
     def _setup_monster_ai_system(self) -> None:
         self._teardown_monster_ai_system()
@@ -3777,7 +3901,7 @@ class SoulSymphony(ShowBase):
             return
         monster["state"] = new_state
         monster["state_timer"] = 0.0
-        self._set_monster_emissive(monster, new_state == "hunting")
+        self._set_monster_emissive(monster, new_state)
         auto_announce_states = {"guarding", "hunting", "attacking", "running"}
         announce_cooldown = float(monster.get("state_announce_cooldown", 0.0))
         if not announce and new_state in auto_announce_states and announce_cooldown <= 0.0:
@@ -3807,18 +3931,73 @@ class SoulSymphony(ShowBase):
             if root is not None and not root.isEmpty():
                 self._spawn_floating_text(root.getPos() + Vec3(0, 0, 1.3), text, color, scale=0.2, life=0.55)
 
-    def _set_monster_emissive(self, monster: dict, enabled: bool) -> None:
+    def _set_monster_emissive(self, monster: dict, state: str) -> None:
         parts = monster.get("parts") or []
+        is_hunting = state == "hunting"
+        phase = float(monster.get("liminal_phase", 0.0))
+        if is_hunting:
+            hue = (self.roll_time * 0.4 + phase * 0.2) % 1.0
+            r, g, b = colorsys.hsv_to_rgb(hue, 0.85, 1.0)
         for entry in parts:
             node = entry.get("node")
             if node is None or node.isEmpty():
                 continue
-            if enabled:
+            if is_hunting:
                 node.setLightOff(1)
-                node.setColorScale(1.6, 1.6, 1.6, 1.0)
+                node.setColor(r, g, b, 1.0)
+                node.setColorScale(2.2, 2.2, 2.2, 1.0)
+                try:
+                    node.setFogOff(1)
+                except Exception:
+                    pass
             else:
                 node.setLightOff(0)
+                node.setColor(1.0, 1.0, 1.0, 1.0)
                 node.setColorScale(1.0, 1.0, 1.0, 1.0)
+                try:
+                    node.setFogOff(0)
+                except Exception:
+                    pass
+
+    def _apply_monster_inactive_glow(self, monster: dict, dt: float) -> None:
+        parts = monster.get("parts") or []
+        if not parts:
+            return
+
+        timer = float(monster.get("inactive_glow_timer", 0.0)) - dt
+        if timer <= 0.0:
+            level = random.random() ** 2
+            if random.random() < 0.35:
+                level *= 0.35
+            monster["inactive_glow_level"] = level
+            timer = random.uniform(
+                float(getattr(self, "monster_inactive_glow_timer_min", 1.2)),
+                float(getattr(self, "monster_inactive_glow_timer_max", 3.6)),
+            )
+        monster["inactive_glow_timer"] = max(0.0, timer)
+
+        level = float(monster.get("inactive_glow_level", 0.0))
+        phase = float(monster.get("liminal_phase", 0.0))
+        hue = (self.roll_time * 0.18 + phase * 0.25) % 1.0
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.85, 1.0)
+        pulse = 0.35 + 0.65 * math.sin(self.roll_time * 1.6 + phase * 3.2)
+        intensity = max(0.0, min(1.0, level * pulse))
+        base_dim = float(getattr(self, "monster_inactive_glow_base_dim", 0.55))
+        gain = float(getattr(self, "monster_inactive_glow_gain", 2.0))
+        scale = base_dim + intensity * gain
+        fog_off = intensity > 0.2
+
+        for entry in parts:
+            node = entry.get("node")
+            if node is None or node.isEmpty():
+                continue
+            node.setLightOff(1)
+            node.setColor(r, g, b, 1.0)
+            node.setColorScale(scale, scale, scale, 1.0)
+            try:
+                node.setFogOff(1 if fog_off else 0)
+            except Exception:
+                pass
 
     def _apply_monster_ai_state(self, monster: dict, state: str) -> None:
         behaviors = monster.get("ai_behaviors")
@@ -4458,6 +4637,59 @@ class SoulSymphony(ShowBase):
         v_planar *= planar_drag
         v_up *= vertical_drag
         self.ball_body.setLinearVelocity(v_planar + up * v_up)
+
+    def _stop_water_loop_sfx(self) -> None:
+        sfx = getattr(self, "sfx_water_loop", None)
+        if sfx is None:
+            return
+        if self.water_loop_active:
+            try:
+                sfx.stop()
+            except Exception:
+                pass
+        self.water_loop_active = False
+
+    def _update_water_loop_sfx(self, dt: float) -> None:
+        sfx = getattr(self, "sfx_water_loop", None)
+        if sfx is None or not hasattr(self, "ball_np"):
+            self._stop_water_loop_sfx()
+            return
+        if not self.water_surfaces:
+            self._stop_water_loop_sfx()
+            return
+
+        ball_pos = self.ball_np.getPos()
+        water_h = self._sample_water_height(ball_pos, self.roll_time)
+        if water_h is None:
+            self._stop_water_loop_sfx()
+            return
+
+        bottom_z = float(ball_pos.z) - float(self.ball_radius)
+        depth = float(water_h) - bottom_z
+        if depth <= 0.0:
+            self._stop_water_loop_sfx()
+            return
+
+        try:
+            vel = Vec3(self.ball_body.getLinearVelocity())
+            speed = vel.length()
+        except Exception:
+            speed = 0.0
+
+        submerge = self._clamp(depth / max(0.1, self.ball_radius * 1.6), 0.0, 1.4)
+        norm = self._clamp(speed / 12.0, 0.0, 1.0)
+        rate = 0.75 + 1.05 * norm
+        vol = (0.08 + 0.22 * norm) * (0.4 + 0.6 * submerge)
+
+        try:
+            sfx.setLoop(True)
+            sfx.setPlayRate(rate)
+            sfx.setVolume(max(0.0, min(0.7, vol)))
+            if not self.water_loop_active:
+                sfx.play()
+                self.water_loop_active = True
+        except Exception:
+            self.water_loop_active = False
 
     def _apply_room_thermal_shader(self, node: NodePath | None) -> None:
         if node is None or node.isEmpty():
@@ -5662,6 +5894,78 @@ class SoulSymphony(ShowBase):
 
         self.magic_missiles = keep
 
+    def _spawn_enemy_projectile(self, origin: Vec3, direction: Vec3, damage: float) -> None:
+        if direction.lengthSquared() < 1e-8:
+            return
+        direction = Vec3(direction)
+        direction.normalize()
+        node = self.sphere_model.copyTo(self.render)
+        node.setPos(origin)
+        node.setScale(0.18)
+        node.clearTexture()
+        node.setLightOff(1)
+        node.setTransparency(TransparencyAttrib.MAlpha)
+        node.setDepthWrite(False)
+        node.setDepthTest(False)
+        node.setBin("transparent", 58)
+        node.setColor(1.0, 0.45, 0.2, 0.9)
+        node.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne,
+            ),
+            1,
+        )
+
+        speed = max(1.0, float(getattr(self, "enemy_projectile_speed", 36.0)))
+        life = max(0.2, float(getattr(self, "enemy_projectile_life", 2.6)))
+        self.enemy_projectiles.append(
+            {
+                "node": node,
+                "vel": direction * speed,
+                "age": 0.0,
+                "life": life,
+                "damage": max(1.0, float(damage)),
+                "phase": random.uniform(0.0, math.tau),
+            }
+        )
+
+    def _update_enemy_projectiles(self, dt: float) -> None:
+        if not self.enemy_projectiles or not hasattr(self, "ball_np"):
+            return
+        ball_pos = self.ball_np.getPos()
+        hit_radius = max(0.25, float(self.ball_radius) * 0.8)
+        keep: list[dict] = []
+
+        for entry in self.enemy_projectiles:
+            node = entry.get("node")
+            if node is None or node.isEmpty():
+                continue
+            entry["age"] = float(entry.get("age", 0.0)) + dt
+            life = float(entry.get("life", 2.6))
+            if entry["age"] >= life:
+                node.removeNode()
+                continue
+
+            pos = node.getPos()
+            vel = Vec3(entry.get("vel", Vec3(0.0, 0.0, 0.0)))
+            next_pos = pos + vel * dt
+            node.setPos(next_pos)
+
+            pulse = 0.6 + 0.4 * math.sin(self.roll_time * 18.0 + float(entry.get("phase", 0.0)))
+            node.setScale(0.16 + 0.06 * pulse)
+
+            if (ball_pos - next_pos).length() <= hit_radius:
+                self._apply_player_damage(float(entry.get("damage", 12.0)))
+                self._spawn_motion_trail(next_pos, scale=0.18, color=(1.0, 0.55, 0.25, 0.7), life=0.16, vel=Vec3(0, 0, 0), use_box=False)
+                node.removeNode()
+                continue
+
+            keep.append(entry)
+
+        self.enemy_projectiles = keep
+
     def _trigger_hyperbomb(self) -> None:
         if self.game_over_active or self.win_active:
             return
@@ -6424,6 +6728,46 @@ class SoulSymphony(ShowBase):
         self.player_hp_label_text_node = label
         self.player_hp_label_np = label_np
 
+        exp_bg = self._instance_quad(self.player_hp_ui, "player-xp-bg", (0.0, 0.55, -0.16, -0.11))
+        exp_bg.setColor(0.04, 0.06, 0.09, 0.82)
+        exp_bg.setTransparency(TransparencyAttrib.MAlpha)
+
+        exp_glow = self._instance_quad(self.player_hp_ui, "player-xp-glow", (-0.01, 0.56, -0.17, -0.10))
+        exp_glow.setColor(0.25, 0.9, 1.0, 0.18)
+        exp_glow.setTransparency(TransparencyAttrib.MAlpha)
+        exp_glow.setDepthWrite(False)
+        exp_glow.setDepthTest(False)
+        exp_glow.setBin("fixed", 102)
+        exp_glow.setLightOff(1)
+        exp_glow.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne,
+            ),
+            1,
+        )
+
+        exp_fill_root = self.player_hp_ui.attachNewNode("player-xp-fill-root")
+        exp_fill_root.setPos(0.01, 0.001, 0)
+        exp_fill = self._instance_quad(exp_fill_root, "player-xp-fill", (0.0, 0.53, -0.15, -0.12))
+        exp_fill.setColor(0.28, 0.9, 1.0, 0.92)
+        exp_fill.setTransparency(TransparencyAttrib.MAlpha)
+
+        exp_label = TextNode("player-xp-label")
+        exp_label.setText("XP")
+        exp_label.setTextColor(0.86, 0.96, 1.0, 0.92)
+        exp_label_np = self.player_hp_ui.attachNewNode(exp_label)
+        exp_label_np.setPos(0.0, 0, -0.07)
+        exp_label_np.setScale(0.045)
+
+        self.player_xp_fill_root = exp_fill_root
+        self.player_xp_fill_np = exp_fill
+        self.player_xp_bg_np = exp_bg
+        self.player_xp_glow_np = exp_glow
+        self.player_xp_label_text_node = exp_label
+        self.player_xp_label_np = exp_label_np
+
         self.monster_hud_ui = self.aspect2d.attachNewNode("monster-hud-ui")
         self.monster_hud_ui.setPos(0.92, 0, 0.9)
         monster_label = TextNode("monster-hud-label")
@@ -6755,6 +7099,31 @@ class SoulSymphony(ShowBase):
             lr, lg, lb = colorsys.hsv_to_rgb((hue_shift + 0.12) % 1.0, 0.45, 1.0)
             label.setTextColor(lr, lg, lb, 0.96)
 
+        xp_root = getattr(self, "player_xp_fill_root", None)
+        if xp_root is not None and not xp_root.isEmpty():
+            xp_next = max(1e-6, float(getattr(self, "player_xp_next", 1.0)))
+            xp_val = max(0.0, float(getattr(self, "player_xp", 0.0)))
+            xp_ratio = max(0.0, min(1.0, xp_val / xp_next))
+            xp_root.setScale(xp_ratio, 1.0, 1.0)
+
+        xp_fill = getattr(self, "player_xp_fill_np", None)
+        if xp_fill is not None and not xp_fill.isEmpty():
+            xp_hue = (self.roll_time * 0.35 + 0.55) % 1.0
+            xr, xg, xb = colorsys.hsv_to_rgb(xp_hue, 0.85, 1.0)
+            xp_fill.setColor(xr, xg, xb, 0.9)
+
+        xp_glow = getattr(self, "player_xp_glow_np", None)
+        if xp_glow is not None and not xp_glow.isEmpty():
+            glow_hue = (self.roll_time * 0.22 + 0.82) % 1.0
+            gr, gg, gb = colorsys.hsv_to_rgb(glow_hue, 0.7, 1.0)
+            xp_glow.setColor(gr, gg, gb, 0.12 + 0.18 * pulse)
+            xp_glow.setScale(1.0 + 0.012 * pulse, 1.0, 1.0)
+
+        xp_label = getattr(self, "player_xp_label_text_node", None)
+        if isinstance(xp_label, TextNode):
+            level = int(getattr(self, "player_level", 1))
+            xp_label.setText(f"LV {level} XP")
+
     def _update_monster_hud_ui(self) -> None:
         node = getattr(self, "monster_hud_text_node", None)
         if not isinstance(node, TextNode):
@@ -6886,6 +7255,77 @@ class SoulSymphony(ShowBase):
             self.win_ui.show()
         self._play_win_sfx()
 
+    def _handle_wave_clear(self) -> None:
+        if bool(getattr(self, "enable_wave_respawn", False)):
+            self._play_win_sfx(force=True)
+            self._queue_next_wave()
+        else:
+            self._trigger_win()
+
+    def _queue_next_wave(self) -> None:
+        if self.game_over_active or self.win_active:
+            return
+        if float(getattr(self, "monster_wave_respawn_timer", 0.0)) > 0.0:
+            return
+        wave_idx = max(1, int(getattr(self, "monster_wave_index", 1)))
+        if hasattr(self, "ball_np") and self.ball_np is not None:
+            reward_pos = self.ball_np.getPos() + Vec3(0, 0, 0.4)
+        else:
+            reward_pos = Vec3(self.map_w * 0.5, self.map_d * 0.5, self.floor_y + 1.2)
+        self._spawn_exp_orbs(reward_pos, 5.0 + wave_idx * 1.5)
+        self.monster_wave_index = wave_idx + 1
+        self.monster_wave_respawn_timer = float(getattr(self, "monster_wave_respawn_delay", 3.0))
+        if hasattr(self, "ball_np") and self.ball_np is not None:
+            self._spawn_floating_text(
+                self.ball_np.getPos() + Vec3(0, 0, 0.9),
+                "WAVE CLEAR",
+                (0.35, 1.0, 0.6, 1.0),
+                scale=0.32,
+                life=1.0,
+            )
+
+    def _start_next_wave(self) -> None:
+        if not self.rooms:
+            return
+        self._teardown_monster_ai_system()
+        for monster in self.monsters:
+            root = monster.get("root")
+            if root is not None and not root.isEmpty():
+                root.removeNode()
+            hum = monster.get("hum_sfx")
+            if hum:
+                hum.stop()
+        self.monsters = []
+
+        wave_idx = max(1, int(getattr(self, "monster_wave_index", 1)))
+        count_base = int(getattr(self, "monster_wave_count_base", 64))
+        count_scale = float(getattr(self, "monster_wave_count_scale", 0.12))
+        count = max(1, int(round(count_base * (1.0 + (wave_idx - 1) * count_scale))))
+        self._spawn_hypercube_monsters(count=count)
+        self._attach_monster_hum_sounds()
+        self._setup_monster_ai_system()
+        if hasattr(self, "ball_np") and self.ball_np is not None:
+            self._spawn_floating_text(
+                self.ball_np.getPos() + Vec3(0, 0, 1.0),
+                f"WAVE {wave_idx}",
+                (0.45, 0.95, 1.0, 1.0),
+                scale=0.35,
+                life=1.15,
+            )
+
+    def _update_wave_respawn(self, dt: float) -> None:
+        if not bool(getattr(self, "enable_wave_respawn", False)):
+            return
+        if self.game_over_active or self.win_active:
+            return
+        timer = float(getattr(self, "monster_wave_respawn_timer", 0.0))
+        if timer <= 0.0:
+            return
+        timer = max(0.0, timer - max(0.0, float(dt)))
+        self.monster_wave_respawn_timer = timer
+        if timer <= 0.0:
+            self._start_next_wave()
+
     def _restart_after_game_over(self) -> None:
         if not getattr(self, "game_over_active", False) and not getattr(self, "win_active", False):
             return
@@ -6933,7 +7373,20 @@ class SoulSymphony(ShowBase):
             if hum:
                 hum.stop()
         self.monsters = []
-        self._spawn_hypercube_monsters(count=64)
+        for proj in self.enemy_projectiles:
+            node = proj.get("node")
+            if node is not None and not node.isEmpty():
+                node.removeNode()
+        self.enemy_projectiles = []
+        for orb in self.exp_orbs:
+            root = orb.get("root")
+            if root is not None and not root.isEmpty():
+                root.removeNode()
+        self.exp_orbs = []
+        self.monster_wave_index = 1
+        self.monster_wave_respawn_timer = 0.0
+        base_count = int(getattr(self, "monster_wave_count_base", 64))
+        self._spawn_hypercube_monsters(count=base_count)
         self._attach_monster_hum_sounds()
         self._setup_monster_ai_system()
 
@@ -6972,6 +7425,7 @@ class SoulSymphony(ShowBase):
         ring.setLightOff(1)
         ring.setTransparency(TransparencyAttrib.MAlpha)
         ring.setDepthWrite(False)
+        ring.setTwoSided(True)
         ring.setBin("transparent", 38)
         ring.setScale(self.ball_radius * 1.3, self.ball_radius * 1.3, self.ball_radius * 0.08)
         ring.setColor(base_col[0], base_col[1], base_col[2], 0.42)
@@ -7116,6 +7570,61 @@ class SoulSymphony(ShowBase):
         perm_crit = max(0.0, float(getattr(self, "critical_chance_bonus_permanent", 0.0)))
         temp_crit = float(getattr(self, "critical_chance_bonus_temp_bonus", 0.14)) if critical_active else 0.0
         self.critical_hit_chance_current = self._clamp(base_crit + perm_crit + temp_crit, 0.0, 0.9)
+
+    def _grant_player_xp(self, amount: float) -> None:
+        if amount <= 0.0:
+            return
+        self.player_xp = max(0.0, float(self.player_xp) + float(amount))
+        leveled = False
+        while self.player_xp >= self.player_xp_next:
+            self.player_xp -= self.player_xp_next
+            self.player_level += 1
+            growth = max(1.05, float(getattr(self, "player_xp_growth", 1.25)))
+            self.player_xp_next = max(6.0, self.player_xp_next * growth)
+            self._apply_level_up_bonus()
+            leveled = True
+        if leveled:
+            self._update_combat_stat_buffs(0.0)
+
+    def _apply_level_up_bonus(self) -> None:
+        cycle = list(getattr(self, "player_level_cycle", ["attack", "defense", "dex", "sta", "int"]))
+        if not cycle:
+            cycle = ["attack", "defense", "dex", "sta", "int"]
+        idx = int(getattr(self, "player_level_cycle_idx", 0))
+        stat = cycle[idx % len(cycle)]
+        self.player_level_cycle_idx = idx + 1
+
+        text = "LEVEL UP"
+        color = (0.5, 1.0, 0.6, 1.0)
+        if stat == "attack":
+            self.player_attack_stat += 1
+            bonus = 0.06 + min(0.12, self.player_attack_stat * 0.005)
+            self.sword_damage_multiplier = min(self.sword_damage_multiplier_cap, self.sword_damage_multiplier + bonus)
+            text = f"LEVEL UP: ATK x{self.sword_damage_multiplier:.2f}"
+            color = (1.0, 0.46, 0.32, 1.0)
+        elif stat == "defense":
+            self.player_defense_stat += 1
+            text = "LEVEL UP: DEF"
+            color = (0.42, 0.9, 1.0, 1.0)
+        elif stat == "dex":
+            self.player_dex_stat += 1
+            text = "LEVEL UP: DEX"
+            color = (1.0, 0.95, 0.34, 1.0)
+        elif stat == "sta":
+            self.player_sta_stat += 1
+            self.player_hp_max += 6.0
+            self.player_hp = min(self.player_hp_max, self.player_hp + 8.0)
+            self._update_player_health_ui()
+            text = f"LEVEL UP: STA {int(round(self.player_hp_max))}"
+            color = (0.48, 1.0, 0.42, 1.0)
+        elif stat == "int":
+            self.player_int_stat += 1
+            text = "LEVEL UP: INT"
+            color = (0.78, 0.55, 1.0, 1.0)
+
+        if hasattr(self, "ball_np") and self.ball_np is not None:
+            self._spawn_floating_text(self.ball_np.getPos() + Vec3(0, 0, 0.75), text, color, scale=0.3, life=1.1)
+        self._play_levelup_sfx()
 
     def _apply_sword_pickup_effect(self, item: dict, ball_pos: Vec3) -> None:
         pickup_type = str(item.get("type", "sword")).lower()
@@ -7314,6 +7823,107 @@ class SoulSymphony(ShowBase):
             return pickup_pos
         return pickup_pos + to_player * (step / dist)
 
+    def _apply_exp_orb_attraction(self, pickup_pos: Vec3, ball_pos: Vec3, dt: float) -> Vec3:
+        to_player = ball_pos - pickup_pos
+        dist = to_player.length()
+        radius = max(0.2, float(getattr(self, "exp_orb_attract_radius", 6.8)))
+        if dist <= 1e-5 or dist > radius:
+            return pickup_pos
+        proximity = 1.0 - (dist / radius)
+        speed = max(0.0, float(getattr(self, "exp_orb_attract_speed", 18.5)))
+        pull = 1.25 + 2.75 * (proximity * proximity)
+        step = min(dist, speed * dt * pull)
+        if step <= 0.0:
+            return pickup_pos
+        return pickup_pos + to_player * (step / dist)
+
+    def _spawn_exp_orb(self, world_pos: Vec3, value: float) -> None:
+        self.exp_orb_serial += 1
+        root = self.world.attachNewNode(f"exp-orb-{self.exp_orb_serial}")
+        root.setPos(world_pos)
+
+        core = self.sphere_model.copyTo(root)
+        scale = 0.12 + 0.03 * math.sqrt(max(0.0, value))
+        core.setScale(scale)
+        core.clearTexture()
+        core.setLightOff(1)
+        core.setTransparency(TransparencyAttrib.MAlpha)
+        core.setColor(0.28, 0.9, 1.0, 0.95)
+
+        glow = self.sphere_model.copyTo(root)
+        glow.setScale(scale * 1.6)
+        glow.clearTexture()
+        glow.setLightOff(1)
+        glow.setTransparency(TransparencyAttrib.MAlpha)
+        glow.setDepthWrite(False)
+        glow.setDepthTest(False)
+        glow.setBin("transparent", 34)
+        glow.setColor(0.24, 0.8, 1.0, 0.35)
+
+        self.exp_orbs.append(
+            {
+                "root": root,
+                "core": core,
+                "glow": glow,
+                "base": Vec3(world_pos),
+                "phase": random.uniform(0.0, math.tau),
+                "speed": random.uniform(1.2, 2.4),
+                "spin": random.uniform(90.0, 210.0),
+                "value": max(0.1, float(value)),
+            }
+        )
+
+    def _spawn_exp_orbs(self, world_pos: Vec3, amount: float) -> None:
+        remaining = max(0.0, float(amount))
+        min_val = max(0.1, float(getattr(self, "exp_orb_value_min", 1.0)))
+        max_val = max(min_val, float(getattr(self, "exp_orb_value_max", 3.2)))
+        if remaining <= 0.0:
+            return
+
+        while remaining > 0.0:
+            value = min(max_val, max(min_val, remaining * random.uniform(0.35, 0.7)))
+            remaining = max(0.0, remaining - value)
+            jitter = Vec3(random.uniform(-0.35, 0.35), random.uniform(-0.35, 0.35), random.uniform(0.0, 0.4))
+            self._spawn_exp_orb(world_pos + jitter, value)
+
+    def _update_exp_orbs(self, dt: float) -> None:
+        if not self.exp_orbs or not hasattr(self, "ball_np"):
+            return
+        ball_pos = self.ball_np.getPos()
+        keep: list[dict] = []
+        pickup_radius = max(0.2, float(getattr(self, "exp_orb_pickup_radius", 0.6)))
+
+        for orb in self.exp_orbs:
+            root = orb.get("root")
+            if root is None or root.isEmpty():
+                continue
+            base = orb.get("base", root.getPos())
+            bob = 0.16 * math.sin(self.roll_time * orb.get("speed", 1.6) * 2.2 + orb.get("phase", 0.0))
+            pos = Vec3(base.x, base.y, base.z + bob)
+            pos = self._apply_exp_orb_attraction(pos, ball_pos, dt)
+            root.setPos(pos)
+            root.setHpr(self.roll_time * orb.get("spin", 120.0), 0, 0)
+
+            hue = (self.roll_time * 2.6 + orb.get("phase", 0.0) * 0.2) % 1.0
+            r, g, b = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+            core = orb.get("core")
+            if core is not None and not core.isEmpty():
+                core.setColor(r, g, b, 0.95)
+            glow = orb.get("glow")
+            if glow is not None and not glow.isEmpty():
+                glow.setColor(r * 0.9, g * 0.9, b * 0.9, 0.35)
+
+            if (ball_pos - pos).length() <= pickup_radius:
+                value = float(orb.get("value", 0.0))
+                self._grant_player_xp(value)
+                self._play_sound(self.sfx_pickup, volume=0.62, play_rate=1.1)
+                root.removeNode()
+                continue
+
+            keep.append(orb)
+
+        self.exp_orbs = keep
+
     def _spawn_sword_powerup(self, world_pos: Vec3) -> None:
         self.sword_pickup_serial += 1
         root = self.world.attachNewNode(f"sword-upgrade-{self.sword_pickup_serial}")
@@ -7447,7 +8057,16 @@ class SoulSymphony(ShowBase):
             self.monsters_slain += 1
             self._update_monster_hud_ui()
             if self.monsters_total > 0 and self.monsters_slain >= self.monsters_total:
-                self._trigger_win()
+                self._handle_wave_clear()
+            xp_gain = 2.0 + float(monster.get("hp_max", self.monster_max_hp)) * 0.04
+            if variant in ("juggernaut", "vanguard"):
+                xp_gain *= 1.45
+            elif variant == "raider":
+                xp_gain *= 1.25
+            elif variant == "giant":
+                xp_gain *= 1.75
+            if root is not None and not root.isEmpty():
+                self._spawn_exp_orbs(root.getPos() + Vec3(0, 0, 0.45), xp_gain)
             self._set_monster_state(monster, "dying", announce=True)
             if not self._play_kill_sfx():
                 self._play_sound(self.sfx_monster_die, volume=0.88, play_rate=1.0)
@@ -7573,6 +8192,13 @@ class SoulSymphony(ShowBase):
             hp_ratio = monster["hp"] / max(1e-6, monster["hp_max"])
             fill.setScale(hp_ratio, 1.0, 1.0)
             fill.setColor(1.0 - hp_ratio * 0.2, 0.28 + hp_ratio * 0.72, 0.22, 1.0)
+
+            outline = monster.get("hp_outline")
+            if outline is None or outline.isEmpty():
+                continue
+            hue = (self.roll_time * 0.8 + float(monster.get("phase", 0.0)) * 0.15) % 1.0
+            r, g, b = colorsys.hsv_to_rgb(hue, 0.9, 1.0)
+            outline.setColor(r, g, b, 0.7)
 
     def _setup_ball_outline(self) -> None:
         if not hasattr(self, "ball_np"):
@@ -8040,6 +8666,14 @@ class SoulSymphony(ShowBase):
         else:
             root.setShaderOff(1)
 
+        for visual in list(self.scene_visuals.values()):
+            if visual is None or visual.isEmpty():
+                continue
+            try:
+                visual.instanceTo(root)
+            except Exception:
+                continue
+
     def _setup_water_reflection(self) -> None:
         self.water_reflection_tex = None
         self.water_reflection_buf = None
@@ -8059,6 +8693,9 @@ class SoulSymphony(ShowBase):
             self.water_reflection_tex = tex
             self.water_reflection_buf = buf
             self.water_reflection_cam = cam
+            if not getattr(self, "_water_reflection_logged", False):
+                print(f"[water] Reflection buffer ready: {size}x{size}")
+                self._water_reflection_logged = True
         except Exception:
             self.water_reflection_tex = None
             self.water_reflection_buf = None
@@ -9992,7 +10629,7 @@ class SoulSymphony(ShowBase):
             l_arch_height = self._clamp(l_len * 0.2, 0.8, 6.0)
             l_control = (l_start + l_end) * 0.5 + up * l_arch_height
             landmark_points = [l_start]
-            l_samples = 22
+            l_samples = 48
             for i in range(1, l_samples):
                 t = i / float(l_samples)
                 omt = 1.0 - t
@@ -10016,21 +10653,26 @@ class SoulSymphony(ShowBase):
 
         if len(landmark_points) >= 2:
             dotted_count = len(landmark_points) - 1
+            dot_stride = 2
+            dot_len = 0.28
             for i in range(dotted_count):
-                if i % 2 == 1:
+                if i % dot_stride != 0:
                     continue
                 a = landmark_points[i]
                 b_pt = landmark_points[i + 1]
+                seg = b_pt - a
+                dot_end = a + seg * dot_len
                 hue = (self.roll_time * 0.45 + (i / max(1.0, float(dotted_count)))) % 1.0
                 rr, rg, rb = colorsys.hsv_to_rgb(hue, 0.92, 1.0)
                 segs.setColor(rr, rg, rb, 0.95)
                 segs.moveTo(a)
-                segs.drawTo(b_pt)
+                segs.drawTo(dot_end)
 
         self.goal_path_np = self.render.attachNewNode(segs.create(True))
         self.goal_path_np.setLightOff(1)
         self.goal_path_np.setShaderOff(1)
         self.goal_path_np.setCollideMask(BitMask32.allOff())
+        self.goal_path_np.setFogOff(1)
         self.goal_path_np.setTransparency(TransparencyAttrib.MAlpha)
         self.goal_path_np.setDepthWrite(False)
         self.goal_path_np.setBin("fixed", 55)
@@ -10244,6 +10886,12 @@ class SoulSymphony(ShowBase):
         if not self.rooms:
             return
         self.monsters_slain = 0
+        wave_idx = max(1, int(getattr(self, "monster_wave_index", 1)))
+        wave_power = max(0, wave_idx - 1)
+        wave_hp_mul = 1.0 + wave_power * float(getattr(self, "monster_wave_hp_scale", 0.12))
+        wave_speed_mul = 1.0 + wave_power * float(getattr(self, "monster_wave_speed_scale", 0.06))
+        wave_def_mul = 1.0 + wave_power * float(getattr(self, "monster_wave_defense_scale", 0.08))
+        wave_attack_mul = 1.0 + wave_power * float(getattr(self, "monster_wave_attack_scale", 0.08))
 
         hp_bg_template = self._get_quad_template("monster-hp-bg", (-0.5, 0.5, -0.045, 0.045))
         hp_fill_template = self._get_quad_template("monster-hp-fill", (0.0, 0.94, -0.03, 0.03))
@@ -10425,6 +11073,7 @@ class SoulSymphony(ShowBase):
                 monster_crit_chance = random.uniform(0.06, 0.18)
             elif variant == "giant":
                 monster_crit_chance = random.uniform(0.02, 0.08)
+            ranged_enabled = variant in ("raider", "vanguard") or (variant == "normal" and random.random() < 0.22)
             fast_speed_boost = 1.0
             if random.random() < float(getattr(self, "monster_fast_ratio", 0.22)):
                 fast_speed_boost = random.uniform(
@@ -10433,8 +11082,10 @@ class SoulSymphony(ShowBase):
                 )
             speed_scale *= speed_mult
             speed_scale *= fast_speed_boost
-            hp_scale *= hp_mult
-            defense *= defense_mult
+            speed_scale *= wave_speed_mul
+            hp_scale *= hp_mult * wave_hp_mul
+            defense *= defense_mult * wave_def_mul
+            attack_mult *= wave_attack_mul
             velocity *= speed_scale
             root.setScale(size_scale)
 
@@ -10445,16 +11096,28 @@ class SoulSymphony(ShowBase):
             hp_bg = hp_bg_template.instanceTo(hp_anchor)
             hp_bg.setColor(0.05, 0.06, 0.08, 0.88)
             hp_bg.setTransparency(TransparencyAttrib.MAlpha)
-            hp_bg.setBin("transparent", 20)
+            hp_bg.setBin("fixed", 129)
             hp_bg.setDepthWrite(False)
+            hp_bg.setDepthTest(False)
+            hp_bg.setLightOff(1)
+
+            hp_outline = self._instance_quad(hp_anchor, "monster-hp-outline", (-0.52, 0.52, -0.06, 0.06))
+            hp_outline.setColor(0.2, 0.9, 1.0, 0.7)
+            hp_outline.setTransparency(TransparencyAttrib.MAlpha)
+            hp_outline.setDepthWrite(False)
+            hp_outline.setDepthTest(False)
+            hp_outline.setBin("fixed", 128)
+            hp_outline.setLightOff(1)
 
             hp_fill_origin = hp_anchor.attachNewNode("hp-fill-origin")
             hp_fill_origin.setPos(-0.47, 0.001, 0.0)
             hp_fill = hp_fill_template.instanceTo(hp_fill_origin)
             hp_fill.setColor(0.25, 1.0, 0.25, 0.92)
             hp_fill.setTransparency(TransparencyAttrib.MAlpha)
-            hp_fill.setBin("transparent", 21)
+            hp_fill.setBin("fixed", 130)
             hp_fill.setDepthWrite(False)
+            hp_fill.setDepthTest(False)
+            hp_fill.setLightOff(1)
 
             state_text = TextNode(f"monster-state-{idx}")
             if variant == "giant":
@@ -10467,6 +11130,10 @@ class SoulSymphony(ShowBase):
             state_np.setPos(0.0, 0.001, 0.09)
             state_np.setScale(0.09)
             state_np.setBillboardPointEye()
+            state_np.setLightOff(1)
+            state_np.setDepthWrite(False)
+            state_np.setDepthTest(False)
+            state_np.setBin("fixed", 130)
 
             monster = {
                 "root": root,
@@ -10486,12 +11153,14 @@ class SoulSymphony(ShowBase):
                 "hp": self.monster_max_hp * hp_scale,
                 "dead": False,
                 "hp_fill": hp_fill_origin,
+                "hp_outline": hp_outline,
                 "hum_sfx": None,
                 "hum_active": False,
                 "variant": variant,
                 "defense": defense,
                 "critical_chance": monster_crit_chance,
                 "contact_damage": random.choice([8.0, 10.0, 12.0, 14.0]) * attack_mult,
+                "attack_mult": attack_mult,
                 "outline_radius": random.uniform(4.0, 7.4),
                 "outline_phase": random.uniform(0.0, math.tau),
                 "state": "guarding" if variant in ("juggernaut", "vanguard") else "wandering",
@@ -10511,6 +11180,8 @@ class SoulSymphony(ShowBase):
                 "fold_jump_cooldown": random.uniform(0.0, 0.55),
                 "liminal_phase": random.uniform(0.0, math.tau),
                 "speed_boost": fast_speed_boost,
+                "ranged_enabled": ranged_enabled,
+                "ranged_cooldown": random.uniform(0.4, 1.4),
             }
             self.monsters.append(monster)
             self._register_scene_visual(root, monster["w"])
@@ -10587,6 +11258,34 @@ class SoulSymphony(ShowBase):
             dist_sq = self._distance4d_sq(pos, float(monster.get("w", 0.0)), ball_pos, float(getattr(self, "player_w", 0.0)))
             hp_ratio = monster.get("hp", 1.0) / max(1e-6, monster.get("hp_max", 1.0))
 
+            active_range = float(getattr(self, "monster_active_range", 46.0))
+            inactive = dist_sq > active_range * active_range
+            if inactive:
+                if not monster.get("inactive", False):
+                    monster["inactive"] = True
+                if monster.get("ai_state") != "inactive":
+                    behaviors = monster.get("ai_behaviors")
+                    if behaviors is not None:
+                        try:
+                            behaviors.removeAi("all")
+                        except Exception:
+                            pass
+                    monster["ai_state"] = "inactive"
+
+                hum = monster.get("hum_sfx")
+                if hum is not None and monster.get("hum_active", False):
+                    hum.stop()
+                    monster["hum_active"] = False
+
+                self._apply_monster_inactive_glow(monster, dt)
+                monster["prev_pos"] = Vec3(pos)
+                self.visual_w_map[id(root)] = monster["w"]
+                alive_monsters.append(monster)
+                continue
+            if monster.get("inactive", False):
+                monster["inactive"] = False
+                self._set_monster_emissive(monster, monster.get("state", "wandering"))
+
             attack_range = float(monster.get("ai_attack_range", 2.0))
             hunt_range = float(monster.get("ai_hunt_range", 11.5))
             guard_range = float(monster.get("ai_guard_range", 17.0))
@@ -10602,16 +11301,33 @@ class SoulSymphony(ShowBase):
                 if dormant_docile:
                     desired_state = "wandering"
                 else:
-                    if hp_ratio < 0.24 and dist_sq < (hunt_range * 1.6) ** 2:
-                        desired_state = "running"
-                    elif dist_sq <= attack_range * attack_range:
-                        desired_state = "attacking"
-                    elif dist_sq <= hunt_range * hunt_range:
-                        desired_state = "hunting"
-                    elif dist_sq <= guard_range * guard_range:
-                        desired_state = "guarding"
+                    far_from_player = dist_sq > guard_range * guard_range
+                    if far_from_player:
+                        desired_state = monster.get("state", "wandering")
+                        if desired_state == "attacking":
+                            desired_state = "wandering"
+                        monster["ambient_state_timer"] = max(
+                            0.0, float(monster.get("ambient_state_timer", 0.0)) - dt
+                        )
+                        if float(monster.get("ambient_state_timer", 0.0)) <= 0.0:
+                            choices = ["wandering", "guarding", "hunting"]
+                            weights = [0.6, 0.25, 0.15]
+                            if hp_ratio < 0.24:
+                                choices.append("running")
+                                weights.append(0.2)
+                            desired_state = random.choices(choices, weights=weights, k=1)[0]
+                            monster["ambient_state_timer"] = random.uniform(2.5, 6.0)
                     else:
-                        desired_state = "wandering"
+                        if hp_ratio < 0.24 and dist_sq < (hunt_range * 1.6) ** 2:
+                            desired_state = "running"
+                        elif dist_sq <= attack_range * attack_range:
+                            desired_state = "attacking"
+                        elif dist_sq <= hunt_range * hunt_range:
+                            desired_state = "hunting"
+                        elif dist_sq <= guard_range * guard_range:
+                            desired_state = "guarding"
+                        else:
+                            desired_state = "wandering"
                 self._set_monster_state(monster, desired_state)
 
             if Vec3(monster.get("knockback_vel", Vec3(0, 0, 0))).lengthSquared() < 0.03:
@@ -10619,6 +11335,25 @@ class SoulSymphony(ShowBase):
 
             monster["fold_jump_cooldown"] = max(0.0, float(monster.get("fold_jump_cooldown", 0.0)) - dt)
             state = monster.get("state", "wandering")
+            if state == "hunting":
+                self._set_monster_emissive(monster, state)
+
+            if bool(monster.get("ranged_enabled", False)):
+                monster["ranged_cooldown"] = max(0.0, float(monster.get("ranged_cooldown", 0.0)) - dt)
+                if state in ("hunting", "attacking", "guarding") and float(monster.get("ranged_cooldown", 0.0)) <= 0.0:
+                    dist = math.sqrt(max(0.0, dist_sq))
+                    min_range = float(getattr(self, "enemy_projectile_min_range", 6.0))
+                    max_range = float(getattr(self, "enemy_projectile_max_range", 28.0))
+                    if min_range <= dist <= max_range and random.random() < float(getattr(self, "enemy_projectile_fire_chance", 0.45)):
+                        origin = pos + Vec3(0.0, 0.0, 0.6)
+                        target = ball_pos + Vec3(0.0, 0.0, 0.35)
+                        shot_dir = target - origin
+                        dmg = float(getattr(self, "enemy_projectile_damage", 14.0)) * max(0.65, float(monster.get("attack_mult", 1.0)))
+                        self._spawn_enemy_projectile(origin, shot_dir, dmg)
+                        monster["ranged_cooldown"] = random.uniform(
+                            float(getattr(self, "enemy_projectile_cooldown_min", 1.4)),
+                            float(getattr(self, "enemy_projectile_cooldown_max", 2.8)),
+                        )
             if state in ("hunting", "attacking", "running", "guarding") and self.liminal_fold_nodes:
                 m_idx = self._nearest_liminal_fold_idx(pos, float(monster.get("w", 0.0)))
                 b_idx = self._nearest_liminal_fold_idx(ball_pos, float(getattr(self, "player_w", 0.0)))
@@ -12672,6 +13407,8 @@ class SoulSymphony(ShowBase):
         self.monster_contact_sfx_cooldown = max(0.0, self.monster_contact_sfx_cooldown - dt)
         self.player_damage_cooldown = max(0.0, self.player_damage_cooldown - dt)
         self.roll_time += dt
+        self.voiceover_timer = max(0.0, float(getattr(self, "voiceover_timer", 0.0)) - dt)
+        self._update_wave_respawn(dt)
         #self._update_water_surface_waves(self.roll_time)
         self._update_water_crystals(dt)
         self._update_ball_texture_scroll(dt)
@@ -12727,12 +13464,14 @@ class SoulSymphony(ShowBase):
             return task.cont
 
         self._update_health_powerups(dt)
+        self._update_exp_orbs(dt)
         self._update_kill_protection_visuals(dt)
         self._update_sword_powerups(dt)
         self._update_floating_texts(dt)
         self._update_hyperbomb(dt)
         self._update_magic_missiles(dt)
         self._update_magic_missile_trails(dt)
+        self._update_enemy_projectiles(dt)
         if self.enable_particles and self.enable_motion_trails:
             self._update_motion_trails(dt)
         elif self.motion_trails:
@@ -12850,6 +13589,7 @@ class SoulSymphony(ShowBase):
             self.ball_body.applyCentralForce(gravity_up * (self.scroll_lift_value * force_mag))
 
         self._apply_water_buoyancy(dt)
+        self._update_water_loop_sfx(dt)
 
         if self.zero_g_mode:
             self.ball_body.setRestitution(self.normal_restitution)

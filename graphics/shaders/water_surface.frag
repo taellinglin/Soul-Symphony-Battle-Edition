@@ -24,8 +24,6 @@ uniform vec3 u_fog_color;
 uniform float u_fog_start;
 uniform float u_fog_end;
 uniform sampler2D u_reflection_tex;
-uniform vec2 u_reflection_scale;
-uniform vec2 u_reflection_offset;
 uniform float u_reflection_strength;
 
 varying vec2 v_uv;
@@ -215,7 +213,7 @@ void main() {
     float room_luma = dot(room_tex, vec3(0.299, 0.587, 0.114));
     vec3 room_desat = mix(room_tex, vec3(room_luma), clamp(u_room_tex_desat, 0.0, 1.0));
 
-    float thermal_mix = clamp(u_thermal_mode, 0.0, 1.0) * clamp(u_thermal_strength, 0.0, 1.0);
+    float thermal_mix = clamp(u_thermal_mode, 0.0, 1.0) * clamp(u_thermal_strength * 0.6, 0.0, 1.0);
     bool thermal_only = (u_thermal_mode > 0.5 && u_thermal_strength > 0.01 && u_room_tex_strength <= 0.01
         && u_spec_strength <= 0.01 && u_diffusion_strength <= 0.01 && u_rainbow_strength <= 0.01);
     vec3 final_col = thermal_only ? thermal_col : mix(water_col, thermal_col, thermal_mix);
@@ -243,7 +241,7 @@ void main() {
         vec3 band_col = radar_palette(band_val);
         float contour = smoothstep(0.48, 0.52, fract(band_pos));
         vec3 thermal_band = mix(band_col, vec3(0.95, 0.98, 1.0), contour * 0.2);
-        float thermal_blend = clamp(u_thermal_strength, 0.0, 1.0);
+        float thermal_blend = clamp(u_thermal_strength * 0.6, 0.0, 1.0);
         final_col = mix(final_col, thermal_band, thermal_blend);
     }
 
@@ -254,15 +252,19 @@ void main() {
         final_col = clamp(final_col + vec3(0.55) * fresnel + highlights * (0.35 + fresnel * 0.85), 0.0, 1.0);
     }
     if (u_reflection_strength > 0.001) {
-        vec2 reflect_uv = v_uv * u_reflection_scale + u_reflection_offset;
+        vec2 reflect_uv = v_uv * vec2(1.0, -1.0) + vec2(0.0, 1.0);
         reflect_uv = clamp(reflect_uv, vec2(0.0), vec2(1.0));
         vec3 reflect_col = texture2D(u_reflection_tex, reflect_uv).rgb;
-        float reflect_mix = clamp(u_reflection_strength * (0.45 + fresnel * 0.55), 0.0, 1.0);
+        float reflect_mix = clamp(u_reflection_strength * (0.65 + fresnel * 0.75), 0.0, 1.0);
         final_col = mix(final_col, reflect_col, reflect_mix);
+        final_col = clamp(final_col + reflect_col * (0.08 + fresnel * 0.12), 0.0, 1.0);
     }
     if (u_spec_strength > 0.01) {
         final_col = hue_shift(final_col, u_time * 0.18);
     }
     float out_alpha = (u_spec_strength > 0.01) ? clamp(u_alpha * 0.35, 0.08, 0.8) : clamp(u_alpha, 0.0, 1.0);
+    if (u_thermal_mode > 0.5) {
+        out_alpha = clamp(out_alpha + 0.18, 0.0, 1.0);
+    }
     gl_FragColor = vec4(final_col, out_alpha);
 }
