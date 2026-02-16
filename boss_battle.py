@@ -304,6 +304,8 @@ def begin_boss_room_encounter(game: Any) -> None:
     game.monster_boss_room_active = True
     game.monster_boss_pending = False
     game.monster_boss_defeated = False
+    if hasattr(game, "_set_bgm_mode"):
+        game._set_bgm_mode("boss")
     game.monster_boss_room_idx = choose_boss_room_index(game)
     game._clear_all_monsters()
     _stash_world_for_boss(game)
@@ -354,6 +356,8 @@ def update_monster_progression(game: Any, dt: float) -> None:
     if game.monster_boss_room_active:
         game.monster_boss_room_active = False
         game.monster_boss_defeated = True
+        if hasattr(game, "_set_bgm_mode"):
+            game._set_bgm_mode("normal")
         _clear_boss_room_arena(game)
         _restore_world_after_boss(game)
         game.monster_wave_index += 1
