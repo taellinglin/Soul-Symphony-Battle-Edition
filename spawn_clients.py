@@ -99,6 +99,10 @@ def client_loop(
             next_spin = time.time() + random.uniform(1.2, 2.6)
             next_bomb = time.time() + random.uniform(2.2, 4.4)
             next_rocket = time.time() + random.uniform(1.4, 3.2)
+            recv_buffer = ""
+            host_pos = None
+            host_w = None
+            host_last = 0.0
 
             while True:
                 now = time.time()
@@ -106,6 +110,28 @@ def client_loop(
                     heading += random.uniform(-0.5, 0.5)
                     speed = random.uniform(0.7, 1.2)
                     next_dir_change = now + random.uniform(0.7, 1.4)
+
+                follow_host = host_pos is not None and (now - host_last) < 2.5
+                support_active = False
+                host_dist_sq = None
+                if follow_host:
+                    hx, hy, _hz = host_pos
+                    to_host_x = hx - pos_x
+                    to_host_y = hy - pos_y
+                    host_dist_sq = to_host_x * to_host_x + to_host_y * to_host_y
+                    hold_radius = max(2.0, min(width, height) * 0.12)
+                    if host_dist_sq > hold_radius * hold_radius:
+                        target_x, target_y = hx, hy
+                    else:
+                        orbit_angle = sector_angle + now * 0.6 + idx * 0.35
+                        orbit_r = max(1.8, hold_radius * 0.6)
+                        target_x = hx + math.cos(orbit_angle) * orbit_r
+                        target_y = hy + math.sin(orbit_angle) * orbit_r
+                    if host_dist_sq > (hold_radius * 1.4) * (hold_radius * 1.4):
+                        speed = max(speed, 1.45)
+                    support_active = host_dist_sq <= (hold_radius * 1.6) * (hold_radius * 1.6)
+                    if host_w is not None:
+                        w_target = host_w
 
                 if mobius_links and now >= next_mobius_seek and now >= mobius_seek_until:
                     link = random.choice(mobius_links)
@@ -158,6 +184,9 @@ def client_loop(
                     w_target = random.uniform(min_w, max_w)
                     w_speed = random.uniform(0.25, 0.65)
                     next_w_shift = now + random.uniform(1.2, 2.6)
+                if follow_host and host_w is not None:
+                    w_target = host_w
+                    w_speed = max(w_speed, 0.55)
                 w_val += (w_target - w_val) * min(1.0, 0.06 + w_speed * 0.08)
                 if w_val < min_w:
                     w_val = min_w
@@ -245,8 +274,9 @@ def client_loop(
                     mobius_warp_cd = now + random.uniform(1.2, 2.2)
                     next_forced_warp = now + random.uniform(4.0, 7.0)
 
+                attack_scale = 0.7 if support_active else 1.0
                 if now >= next_swing:
-                    next_swing = now + random.uniform(0.6, 1.6)
+                    next_swing = now + random.uniform(0.6, 1.6) * attack_scale
                     attack = {
                         "type": "attack_event",
                         "client": name,
@@ -259,7 +289,7 @@ def client_loop(
                     sock.sendall((json.dumps(attack) + "\n").encode("utf-8"))
 
                 if now >= next_spin:
-                    next_spin = now + random.uniform(1.2, 2.8)
+                    next_spin = now + random.uniform(1.2, 2.8) * attack_scale
                     attack = {
                         "type": "attack_event",
                         "client": name,
@@ -272,7 +302,7 @@ def client_loop(
                     sock.sendall((json.dumps(attack) + "\n").encode("utf-8"))
 
                 if now >= next_bomb:
-                    next_bomb = now + random.uniform(2.4, 4.8)
+                    next_bomb = now + random.uniform(2.4, 4.8) * attack_scale
                     attack = {
                         "type": "attack_event",
                         "client": name,
@@ -285,7 +315,7 @@ def client_loop(
                     sock.sendall((json.dumps(attack) + "\n").encode("utf-8"))
 
                 if now >= next_rocket:
-                    next_rocket = now + random.uniform(1.4, 3.2)
+                    next_rocket = now + random.uniform(1.4, 3.2) * attack_scale
                     attack = {
                         "type": "attack_event",
                         "client": name,
@@ -322,7 +352,39 @@ def client_loop(
                 # Drain any echoes without blocking.
                 sock.settimeout(0.0)
                 try:
-                    sock.recv(4096)
+                    while True:
+                        chunk = sock.recv(4096)
+                        if not chunk:
+                            break
+                        recv_buffer += chunk.decode("utf-8", errors="ignore")
+                        while "\n" in recv_buffer:
+                            line, recv_buffer = recv_buffer.split("\n", 1)
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                msg = json.loads(line)
+                            except Exception:
+                                continue
+                            if not isinstance(msg, dict):
+                                continue
+                            if msg.get("type") != "input":
+                                continue
+                            client = str(msg.get("client") or "").strip()
+                            if not client or client == name or client.startswith("bot_"):
+                                continue
+                            pos = msg.get("pos")
+                            if isinstance(pos, (list, tuple)) and len(pos) >= 3:
+                                try:
+                                    host_pos = (float(pos[0]), float(pos[1]), float(pos[2]))
+                                    host_last = now
+                                except Exception:
+                                    pass
+                            if "w" in msg:
+                                try:
+                                    host_w = float(msg.get("w"))
+                                except Exception:
+                                    pass
                 except Exception:
                     pass
                 finally:

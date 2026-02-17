@@ -548,6 +548,9 @@ def begin_boss_room_encounter(game: Any) -> None:
     game.monster_boss_defeated = False
     if hasattr(game, "_set_bgm_mode"):
         game._set_bgm_mode("boss")
+    boss_voiceover = getattr(game, "_play_boss_entry_voiceover", None)
+    if callable(boss_voiceover):
+        boss_voiceover()
     game.monster_boss_room_idx = choose_boss_room_index(game)
     game._clear_all_monsters()
     _stash_world_for_boss(game)
@@ -585,17 +588,21 @@ def begin_boss_room_encounter(game: Any) -> None:
 
     remote_players = getattr(game, "remote_players", None)
     if isinstance(remote_players, dict) and remote_players:
-        ring_radius = max(1.6, hub_half.y * 0.9)
-        step = math.tau / max(1, len(remote_players))
-        for idx, entry in enumerate(remote_players.values()):
-            if not isinstance(entry, dict):
-                continue
-            angle = step * idx
-            entry["boss_warp_pos"] = Vec3(
-                hub_pos.x + math.cos(angle) * ring_radius,
-                hub_pos.y + math.sin(angle) * ring_radius,
-                hub_top_z,
-            )
+        assign = getattr(game, "_assign_remote_boss_positions", None)
+        if callable(assign):
+            assign()
+        else:
+            ring_radius = max(1.6, hub_half.y * 0.9)
+            step = math.tau / max(1, len(remote_players))
+            for idx, entry in enumerate(remote_players.values()):
+                if not isinstance(entry, dict):
+                    continue
+                angle = step * idx
+                entry["boss_warp_pos"] = Vec3(
+                    hub_pos.x + math.cos(angle) * ring_radius,
+                    hub_pos.y + math.sin(angle) * ring_radius,
+                    hub_top_z,
+                )
 
     for monster in game.monsters:
         root = monster.get("root")
@@ -659,6 +666,9 @@ def update_monster_progression(game: Any, dt: float) -> None:
                 if hasattr(game, "ball_body") and game.ball_body is not None:
                     game.ball_body.setLinearVelocity(Vec3(0, 0, 0))
                     game.ball_body.setAngularVelocity(Vec3(0, 0, 0))
+        return_remote = getattr(game, "_return_remote_players_from_boss", None)
+        if callable(return_remote):
+            return_remote()
         game.monster_wave_index += 1
         game.monster_level_current = min(int(getattr(game, "monster_level_cap", 150)), int(getattr(game, "monster_level_current", 1)) + 1)
         game.monster_respawn_timer = float(getattr(game, "monster_respawn_delay", 1.1))
