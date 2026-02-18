@@ -7,6 +7,54 @@ import socket
 import threading
 import time
 
+BOT_NAME_POOL = [
+    "Ling Lin",
+    "Sanny Lin",
+    "Avery Chen",
+    "Kai Wu",
+    "Mina Park",
+    "Jun Li",
+    "Noah Kim",
+    "Iris Zhang",
+    "Evan Liu",
+    "Lia Sun",
+    "Sora Tan",
+    "Rin Zhao",
+    "Nora Xu",
+    "Miles Cho",
+    "Tessa Han",
+    "Aria Song",
+    "Leo Park",
+    "Jin Park",
+    "Yuki Mori",
+    "Ari Lee",
+    "Zoe Lin",
+    "Maya Chen",
+    "Jules Yang",
+    "Remy Luo",
+    "Jade Wu",
+    "Jae Kim",
+    "Dylan Hsu",
+    "Cora Wen",
+    "Vera Song",
+    "Toby Gao",
+]
+
+
+def _choose_bot_display_name(idx: int, total_bots: int) -> str:
+    pool = list(BOT_NAME_POOL)
+    ensured = ["Ling Lin", "Sanny Lin"]
+    if total_bots <= 1:
+        return ensured[0]
+    if idx < len(ensured):
+        return ensured[idx]
+    extras = [name for name in pool if name not in ensured]
+    random.shuffle(extras)
+    pick_idx = max(0, idx - len(ensured))
+    if pick_idx < len(extras):
+        return extras[pick_idx]
+    return f"Player {idx + 1}"
+
 def client_loop(
     idx: int,
     host: str,
@@ -30,6 +78,7 @@ def client_loop(
     total_bots: int,
 ) -> None:
     name = f"bot_{idx:02d}"
+    display_name = _choose_bot_display_name(idx, total_bots)
     level = random.randint(1, 8)
     xp_next = 10 + level * 6
     xp = random.randint(0, xp_next)
@@ -332,6 +381,7 @@ def client_loop(
                     payload = {
                         "type": "input",
                         "client": name,
+                        "display_name": display_name,
                         "t": now,
                         "move": [move_x, move_y],
                         "fwd": [move_x, move_y],
@@ -403,7 +453,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Spawn multiple TCP clients for load testing.")
     parser.add_argument("--host", default="63.41.180.121")
     parser.add_argument("--port", type=int, default=8383)
-    parser.add_argument("--count", type=int, default=13)
+    parser.add_argument("--count", type=int, default=2)
     parser.add_argument("--rate", type=float, default=0.05, help="Seconds between input messages")
     parser.add_argument("--min-x", type=float, default=6.0)
     parser.add_argument("--max-x", type=float, default=60.0)
