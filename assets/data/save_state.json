@@ -1,0 +1,17 @@
+{
+  "player_level": 15,
+  "player_xp": 237.27630096644316,
+  "player_xp_next": 380.295180068469,
+  "player_level_cycle_idx": 14,
+  "player_attack_stat": 8,
+  "player_defense_stat": 11,
+  "player_dex_stat": 13,
+  "player_sta_stat": 8,
+  "player_int_stat": 5,
+  "player_hp_max": 148.0,
+  "player_hp": 148.0,
+  "sword_damage_multiplier": 1.839,
+  "monster_wave_index": 4,
+  "boss_active": false,
+  "boss_return_pos": null
+}

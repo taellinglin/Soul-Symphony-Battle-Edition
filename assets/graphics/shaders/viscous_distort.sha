@@ -1,0 +1,66 @@
+//Cg
+
+void vshader(
+    float4 vtx_position : POSITION,
+    float2 vtx_texcoord0 : TEXCOORD0,
+    out float4 l_position : POSITION,
+    out float2 l_texcoord0 : TEXCOORD0,
+    uniform float4x4 mat_modelproj)
+{
+    l_position = mul(mat_modelproj, vtx_position);
+    l_texcoord0 = vtx_texcoord0;
+}
+
+float hash21(float2 p)
+{
+    p = frac(p * float2(123.34, 456.21));
+    p += dot(p, p + 34.345);
+    return frac(p.x * p.y);
+}
+
+void fshader(
+    float2 l_texcoord0 : TEXCOORD0,
+    out float4 o_color : COLOR,
+    uniform sampler2D tx : TEXUNIT0,
+    uniform float u_time,
+    uniform float u_speed,
+    uniform float u_strength)
+{
+    float2 uv = l_texcoord0;
+    float t = u_time;
+    float spd = saturate(u_speed);
+    float strength = max(0.0, u_strength) * (0.45 + 0.95 * spd);
+
+    float2 c1 = float2(0.35 + 0.12 * sin(t * 0.67), 0.56 + 0.1 * cos(t * 0.51));
+    float2 c2 = float2(0.66 + 0.09 * cos(t * 0.83), 0.38 + 0.11 * sin(t * 0.59));
+
+    float2 p1 = uv - c1;
+    float2 p2 = uv - c2;
+    float r1 = length(p1) + 1e-5;
+    float r2 = length(p2) + 1e-5;
+
+    float bulge1 = exp(-r1 * 8.0) * sin(t * 2.7 - r1 * 34.0);
+    float bulge2 = exp(-r2 * 9.2) * cos(t * 2.1 - r2 * 30.0);
+
+    float2 radial1 = p1 / r1;
+    float2 radial2 = p2 / r2;
+
+    float flow = sin((uv.x * 11.0 + uv.y * 14.0) + t * 1.8)
+               + cos((uv.x * 17.0 - uv.y * 9.0) - t * 1.35);
+    flow *= 0.5;
+
+    float n = hash21(uv * 42.0 + t * 0.08) - 0.5;
+
+    float2 warp = radial1 * bulge1 * 0.022 * strength;
+    warp -= radial2 * bulge2 * 0.018 * strength;
+    warp += float2(flow * 0.006, -flow * 0.0055) * strength;
+    warp += float2(n, -n) * 0.0022 * strength;
+
+    float2 uv2 = uv + warp;
+    uv2 = clamp(uv2, float2(0.001, 0.001), float2(0.999, 0.999));
+
+    float4 col = tex2D(tx, uv2);
+    float glowBoost = 1.0 + 0.18 * strength;
+    col.rgb *= glowBoost;
+    o_color = col;
+}
