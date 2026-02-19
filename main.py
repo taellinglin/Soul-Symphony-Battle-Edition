@@ -1731,7 +1731,8 @@ class SoulSymphony(ShowBase):
     def _attach_monster_hum_sounds(self) -> None:
         if not hasattr(self, "audio3d") or not self.monsters:
             return
-        if not self.sfx_monster_hum_path:
+        hum_path = getattr(self, "sfx_monster_hum_path", None)
+        if not hum_path:
             return
 
         for monster in self.monsters:
@@ -1740,7 +1741,7 @@ class SoulSymphony(ShowBase):
             root = monster.get("root")
             if root is None or root.isEmpty():
                 continue
-            hum = self.audio3d.loadSfx(self.sfx_monster_hum_path)
+            hum = self.audio3d.loadSfx(hum_path)
             if not hum:
                 continue
             self.audio3d.attachSoundToObject(hum, root)
@@ -4267,6 +4268,10 @@ class SoulSymphony(ShowBase):
     def _play_bgm_path(self, path: str | None) -> bool:
         if not path:
             return False
+        if not hasattr(self, "bgm_track"):
+            self.bgm_track = None
+        if not hasattr(self, "bgm_track_path"):
+            self.bgm_track_path = None
         if path == getattr(self, "bgm_track_path", None) and self.bgm_track is not None:
             return True
         if self.bgm_track is not None:
